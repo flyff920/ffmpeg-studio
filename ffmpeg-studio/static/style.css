@@ -213,6 +213,9 @@ body {
   border-color: var(--primary); background: var(--primary-soft);
   color: var(--primary); font-weight: 600;
 }
+.radio-card.unavailable:not(.checked) {
+  opacity: .5; border-style: dashed; color: var(--text-3);
+}
 
 /* 开关 */
 .switch-row { display: flex; align-items: center; gap: 8px; padding-top: 8px; }

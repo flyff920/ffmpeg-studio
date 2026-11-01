@@ -411,6 +411,532 @@ const FEATURES = [
   ],
   isProbe: true,
   build() { return { argv: [] }; }
+},
+/* ==================== 视频处理（增强） ==================== */
+{
+  id: "enhance", group: "视频处理", icon: "🎨", name: "画面调节",
+  desc: "调整亮度、对比度、饱和度与伽马（eq 滤镜）",
+  tag: "_enhanced", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要调色的视频。eq 滤镜是 FFmpeg 最常用的画面校正工具，可修复偏暗、灰蒙蒙、色彩过艳等问题。" },
+    { key: "brightness", label: "亮度", type: "range", flag: "brightness", default: 0, min: -1, max: 1, step: 0.05,
+      help: "0 为原始亮度，正数提亮、负数压暗。<b>范围 -1 到 1</b>，建议微调 ±0.2 以内，幅度过大容易出现死白或死黑。" },
+    { key: "contrast", label: "对比度", type: "range", flag: "contrast", default: 1, min: 0, max: 2, step: 0.05,
+      help: "1 为原始对比度，大于 1 反差更强、画面更通透，小于 1 更灰更柔和。配合亮度一起调效果最自然。" },
+    { key: "saturation", label: "饱和度", type: "range", flag: "saturation", default: 1, min: 0, max: 3, step: 0.1,
+      help: "1 为原始饱和度，0 是黑白，2 以上色彩浓艳。人像建议 0.9-1.1，风景可到 1.3。" },
+    { key: "gamma", label: "伽马", type: "range", flag: "gamma", default: 1, min: 0.1, max: 4, step: 0.1, advanced: true,
+      help: "影响中间调的明暗分布：大于 1 提亮暗部（保留高光），小于 1 压暗中间调。修偏暗素材比单纯拉亮度更自然。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "调色结果的保存路径，CRF 20 输出保证画质。" }
+  ],
+  build(v) {
+    const f = `eq=brightness=${v.brightness}:contrast=${v.contrast}:saturation=${v.saturation}:gamma=${v.gamma}`;
+    return { argv: ["-i", v.input, "-vf", f, "-c:v", "libx264", "-crf", "20", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "denoise", group: "视频处理", icon: "🧹", name: "降噪 / 去隔行",
+  desc: "去除画面噪点、消除隔行扫描的横纹",
+  tag: "_clean", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "老片修复、夜间拍摄噪点多的素材、以及电视录制产生的隔行横纹视频。" },
+    { key: "denoise", label: "降噪强度", type: "radio", default: "light",
+      options: [
+        { value: "none", label: "不降噪" },
+        { value: "light", label: "轻度 (hqdn3d 4:3:6:4.5)" },
+        { value: "strong", label: "强力 (hqdn3d 8:6:12:9)" }
+      ],
+      help: "hqdn3d 是高质量 3D 降噪器，四个参数分别是亮度/色度的空间与时间降噪强度。<b>降噪越强细节损失越多</b>，动画片可放心用强力，实拍建议轻度。" },
+    { key: "deint", label: "去除隔行横纹", type: "switch", flag: "yadif", default: false,
+      help: "开启后用 yadif 反交错。仅对<b>隔行扫描</b>素材（老 DVD、电视录制）有效；逐行素材开启反而会损失纵向分辨率。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const parts = [];
+    if (v.deint) parts.push("yadif");
+    if (v.denoise === "light") parts.push("hqdn3d=4:3:6:4.5");
+    if (v.denoise === "strong") parts.push("hqdn3d=8:6:12:9");
+    const a = ["-i", v.input];
+    if (parts.length) a.push("-vf", parts.join(","));
+    a.push("-c:v", "libx264", "-crf", "20", "-c:a", "copy", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "sharpen", group: "视频处理", icon: "🔎", name: "锐化 / 模糊",
+  desc: "提升画面清晰度，或柔化磨皮、局部打码",
+  tag: "_sharp", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "锐化适合压缩后变糊的素材；模糊适合做背景虚化、隐私遮挡或柔化皮肤。" },
+    { key: "mode", label: "处理方式", type: "radio", default: "unsharp",
+      options: [
+        { value: "unsharp", label: "锐化 (unsharp)" },
+        { value: "blur", label: "模糊 (boxblur)" }
+      ],
+      help: "unsharp 是反锐化掩模，通过增强边缘对比提升观感清晰度；boxblur 是方框模糊，半径越大越糊。" },
+    { key: "amount", label: "锐化强度", type: "range", flag: "unsharp", default: 1.0, min: 0.2, max: 3, step: 0.1,
+      help: "1.0 为适中，2 以上边缘会出现白色描边（光晕）。压缩视频建议 0.8-1.5，过高反而显脏。" },
+    { key: "radius", label: "模糊半径", type: "range", flag: "boxblur", default: 5, min: 1, max: 20,
+      help: "模糊模式下生效，半径 5 轻微柔化，15 以上适合大面积遮挡。第二个参数（幂次）固定为 2。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const vf = v.mode === "unsharp" ? `unsharp=5:5:${v.amount}:5:5:0` : `boxblur=${v.radius}:2`;
+    return { argv: ["-i", v.input, "-vf", vf, "-c:v", "libx264", "-crf", "19", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "fps", group: "视频处理", icon: "🎞️", name: "帧率调整",
+  desc: "统一帧率，解决音画不同步或播放卡顿",
+  tag: "_fps", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "可变帧率（VFR）素材、手机录屏、游戏录像最容易出现音画不同步，统一到固定帧率即可解决。" },
+    { key: "fps", label: "目标帧率", type: "select", flag: "fps=", default: "30",
+      options: ["24","25","30","50","60","120"],
+      help: "电影 24、国内视频 25、网络视频 30、游戏与运动画面 60。<b>降帧会丢画面</b>（但体积变小），升帧只是复制帧不会变流畅。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    return { argv: ["-i", v.input, "-vf", `fps=${v.fps}`, "-c:v", "libx264", "-crf", "20", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "reverse", group: "视频处理", icon: "⏪", name: "视频倒放",
+  desc: "让视频和音频从尾到头倒着播放",
+  tag: "_reverse", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "倒放会把整段视频读入内存后再输出，<b>文件越大越吃内存</b>，建议先剪辑成短片再倒放。" },
+    { key: "audio", label: "音频同时倒放", type: "switch", flag: "areverse", default: true,
+      help: "开启后音频也倒放（areverse）；关闭则保留正常音频，可能与画面对不上。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "倒放结果的保存路径。" }
+  ],
+  build(v) {
+    const a = ["-i", v.input, "-vf", "reverse"];
+    if (v.audio) a.push("-af", "areverse");
+    a.push("-c:v", "libx264", "-crf", "18", "-c:a", "aac", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "hwaccel", group: "视频处理", icon: "⚡", name: "硬件加速转码",
+  desc: "用显卡编码，速度可达 CPU 的数倍",
+  tag: "_hw", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "大批量转码、直播录制回压时最有用。显卡编码速度极快，但<b>同码率下画质略逊于 CPU（libx264）</b>。" },
+    { key: "encoder", label: "硬件编码器", type: "radio", flag: "-c:v", default: "h264_nvenc",
+      options: [
+        { value: "h264_nvenc", label: "NVIDIA H.264" },
+        { value: "hevc_nvenc", label: "NVIDIA H.265" },
+        { value: "h264_qsv", label: "Intel QSV H.264" },
+        { value: "hevc_qsv", label: "Intel QSV H.265" },
+        { value: "h264_amf", label: "AMD AMF H.264" },
+        { value: "hevc_amf", label: "AMD AMF H.265" }
+      ],
+      help: "按显卡品牌选择：N 卡用 NVENC，Intel 核显用 QSV，A 卡用 AMF。<b>选错会直接报错</b>，日志里会提示 encoder not found 或 device 初始化失败。" },
+    { key: "quality", label: "质量参数", type: "range", flag: "cq/global_quality", default: 23, min: 15, max: 40,
+      help: "数值越小画质越好、体积越大（含义同 CRF）。NVENC 对应 <b>-cq</b>，QSV 对应 <b>-global_quality</b>，AMF 对应 <b>-qp_i/-qp_p</b>，本工具会按编码器自动切换。" },
+    { key: "preset", label: "NVENC 预设", type: "select", flag: "-preset", default: "p5", advanced: true,
+      options: ["p1","p3","p5","p7"],
+      help: "仅 NVIDIA 生效：p1 最快、p7 最慢但压缩率最高。<b>QSV / AMF 会忽略此参数</b>。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "转码结果的保存路径。" }
+  ],
+  build(v) {
+    const a = ["-i", v.input, "-c:v", v.encoder];
+    if (v.encoder.includes("nvenc")) {
+      a.push("-preset", v.preset, "-rc", "vbr", "-cq", String(v.quality));
+    } else if (v.encoder.includes("qsv")) {
+      a.push("-global_quality", String(v.quality));
+    } else {
+      a.push("-qp_i", String(v.quality), "-qp_p", String(v.quality));
+    }
+    a.push("-c:a", "aac", "-b:a", "192k", v.output);
+    return { argv: a };
+  }
+},
+/* ==================== 字幕与叠加 ==================== */
+{
+  id: "sub_burn", group: "字幕与叠加", icon: "🅰️", name: "字幕烧录",
+  desc: "把 SRT/ASS 字幕压进画面，任何播放器都能显示",
+  tag: "_subbed", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "字幕烧录（hardcode）会把文字变成画面像素，兼容一切播放器与平台，代价是无法再关闭字幕，且必须重新编码。" },
+    { key: "sub", label: "字幕文件", type: "file", required: true, filter: "字幕文件|*.srt;*.ass;*.ssa|所有文件 (*.*)|*.*",
+      help: "支持 SRT、ASS、SSA。<b>ASS 的自带样式会被覆盖</b>为本工具指定的字号与边距（如需保留原样式请直接用命令行）。" },
+    { key: "fontSize", label: "字号 (px)", type: "number", default: 24,
+      help: "1080p 视频建议 22-28，4K 建议 40 以上。字号过小在手机上看不清。" },
+    { key: "marginV", label: "距底部距离", type: "number", default: 30, advanced: true,
+      help: "字幕距画面底部的像素距离，避开播放器进度条区域。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "烧录结果的保存路径。" }
+  ],
+  build(v) {
+    const p = String(v.sub).replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    const style = `FontSize=${v.fontSize},MarginV=${v.marginV}`;
+    return { argv: ["-i", v.input, "-vf", `subtitles=filename='${p}':force_style='${style}'`,
+      "-c:v", "libx264", "-crf", "20", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "sub_mux", group: "字幕与叠加", icon: "💬", name: "字幕封装（软字幕）",
+  desc: "把字幕作为独立轨道嵌入容器，可随时开关",
+  tag: "_submux", outExt: "mp4",
+  extMap: ["container", { mp4: "mp4", mkv: "mkv" }],
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "软字幕不改变画面，播放器里可以自由开关。<b>视频流直接复制，不损失画质、速度极快</b>。" },
+    { key: "sub", label: "字幕文件", type: "file", required: true, filter: "字幕文件|*.srt;*.ass;*.ssa|所有文件 (*.*)|*.*",
+      help: "要嵌入的字幕文件，会作为一条独立字幕轨加入。" },
+    { key: "container", label: "输出容器", type: "radio", default: "mp4",
+      options: [
+        { value: "mp4", label: "MP4（mov_text）" },
+        { value: "mkv", label: "MKV（SRT/ASS）" }
+      ],
+      help: "MP4 只支持 mov_text 文本字幕，会<b>丢失字体与位置样式</b>；MKV 支持 SRT、ASS 甚至图形字幕，样式完整。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "封装结果的保存路径，扩展名会随容器自动切换。" }
+  ],
+  build(v) {
+    const sc = v.container === "mkv" ? "srt" : "mov_text";
+    return { argv: ["-i", v.input, "-i", v.sub, "-map", "0", "-map", "1",
+      "-c", "copy", "-c:s", sc, v.output] };
+  }
+},
+{
+  id: "pip", group: "字幕与叠加", icon: "🖥️", name: "画中画",
+  desc: "把一段视频缩小叠加到主视频的角落",
+  tag: "_pip", outExt: "mp4",
+  params: [
+    { key: "main", label: "主视频", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "作为背景大画面的视频，其分辨率决定最终输出尺寸。" },
+    { key: "pip", label: "画中画视频", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "叠加到角落的小画面，例如游戏画面、反应镜头、演示操作。" },
+    { key: "pos", label: "叠加位置", type: "radio", default: "br",
+      options: [
+        { value: "tl", label: "左上" }, { value: "tr", label: "右上" },
+        { value: "bl", label: "左下" }, { value: "br", label: "右下" }
+      ],
+      help: "小画面出现在哪个角落，配合边距微调。" },
+    { key: "percent", label: "小画面宽度占比", type: "range", default: 30, min: 10, max: 50, step: 5, unit: "%",
+      help: "按<b>画中画源自身宽度</b>的百分比缩放，高度等比。想精确控制到主视频的比例，可先把画中画视频裁成目标尺寸。" },
+    { key: "margin", label: "边距 (px)", type: "number", default: 20,
+      help: "小画面与画面边缘的距离。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "合成结果的保存路径。" }
+  ],
+  build(v) {
+    const m = Number(v.margin) || 0;
+    const posMap = {
+      tl: `${m}:${m}`, tr: `W-w-${m}:${m}`,
+      bl: `${m}:H-h-${m}`, br: `W-w-${m}:H-h-${m}`
+    };
+    const fc = `[1:v]scale=iw*${Number(v.percent) / 100}:-1[pip];[0:v][pip]overlay=${posMap[v.pos]}[v]`;
+    return { argv: ["-i", v.main, "-i", v.pip, "-filter_complex", fc,
+      "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "20", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "stack", group: "字幕与叠加", icon: "🀫", name: "双画面拼接",
+  desc: "左右或上下并排显示两段视频（对比/合拍）",
+  tag: "_stack", outExt: "mp4",
+  params: [
+    { key: "a", label: "视频 A", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "左/上侧画面。两段视频会被<b>各自缩放并补边</b>到统一尺寸，避免拼接时高度不一致报错。" },
+    { key: "b", label: "视频 B", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "右/下侧画面。建议两段视频时长接近，最终时长以较长者为准（不足部分黑屏）。" },
+    { key: "layout", label: "排列方式", type: "radio", flag: "hstack/vstack", default: "h",
+      options: [
+        { value: "h", label: "左右并排（1280×720）" },
+        { value: "v", label: "上下堆叠（1280×720）" }
+      ],
+      help: "hstack 水平拼接，vstack 垂直堆叠。输出统一为 1280×720，单侧画面 640×720（左右）或 1280×360（上下）。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "拼接结果的保存路径。" }
+  ],
+  build(v) {
+    const w = 640, h = 720;                  // 左右并排时单侧尺寸
+    const vw = 1280, vh = 360;               // 上下堆叠时单侧尺寸
+    const tw = v.layout === "h" ? w : vw;
+    const th = v.layout === "h" ? h : vh;
+    const fit = (i) => `[${i}:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease,` +
+      `pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2,setsar=1[s${i}]`;
+    const fc = `${fit(0)};${fit(1)};[s0][s1]${v.layout === "h" ? "hstack" : "vstack"}=inputs=2[v]`;
+    return { argv: ["-i", v.a, "-i", v.b, "-filter_complex", fc,
+      "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "20", "-c:a", "aac", v.output] };
+  }
+},
+/* ==================== 音频处理（后期） ==================== */
+{
+  id: "audio_cut", group: "音频处理", icon: "✂️", name: "音频剪辑",
+  desc: "截取音频片段，或从视频中截取一段音轨",
+  tag: "_acut", outExt: "mp3",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: AUDIO_FILTER,
+      help: "可以是纯音频，也可以是视频（会自动丢弃视频流，只保留音频）。" },
+    { key: "start", label: "开始时间", type: "text", flag: "-ss", default: "00:00:00", placeholder: "如 00:01:30",
+      help: "截取起始点，支持 HH:MM:SS 或秒数。" },
+    { key: "end", label: "结束时间", type: "text", flag: "-to", placeholder: "如 00:03:00（与时长二选一）",
+      help: "截取结束点，与「时长」只需填一个。" },
+    { key: "duration", label: "时长", type: "text", flag: "-t", placeholder: "如 00:01:30 或 90",
+      help: "从开始时间往后的持续时长。" },
+    { key: "mode", label: "剪辑模式", type: "radio", default: "copy",
+      options: [
+        { value: "copy", label: "⚡ 无损复制" },
+        { value: "reencode", label: "🎯 重编码" }
+      ],
+      help: "无损复制速度极快且音质不变，但<b>输出扩展名必须与源编码匹配</b>（源是 AAC 就存 .m4a/.aac）；重编码则统一转为 MP3。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "音频片段的保存路径。" }
+  ],
+  build(v) {
+    const t = [];
+    if (v.start) t.push("-ss", v.start);
+    if (v.end) t.push("-to", v.end);
+    else if (v.duration) t.push("-t", v.duration);
+    const a = [...t, "-i", v.input, "-vn"];
+    if (v.mode === "copy") a.push("-c:a", "copy");
+    else a.push("-c:a", "libmp3lame", "-b:a", "192k");
+    a.push(v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "fade", group: "音频处理", icon: "🌗", name: "音频淡入淡出",
+  desc: "首尾音量渐入渐出，接歌接片更自然",
+  tag: "_fade", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "视频或音频均可。视频流直接复制不重编码，只处理音频。" },
+    { key: "fadeIn", label: "淡入时长 (秒)", type: "number", default: 1,
+      help: "从 0 秒开始音量从无到有的时长。0 表示不淡入。" },
+    { key: "fadeOut", label: "淡出时长 (秒)", type: "number", default: 1,
+      help: "结尾处音量渐弱的时长。" },
+    { key: "outStart", label: "淡出开始时间 (秒)", type: "number", default: 8,
+      help: "<b>关键参数</b>：淡出从第几秒开始。按你的视频总时长填写，例如 10 秒的视频、淡出 2 秒，这里填 8。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const af = [];
+    if (Number(v.fadeIn) > 0) af.push(`afade=t=in:st=0:d=${v.fadeIn}`);
+    if (Number(v.fadeOut) > 0) af.push(`afade=t=out:st=${v.outStart}:d=${v.fadeOut}`);
+    const a = ["-i", v.input];
+    if (af.length) a.push("-af", af.join(","));
+    a.push("-c:v", "copy", "-c:a", "aac", "-b:a", "192k", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "loudnorm", group: "音频处理", icon: "📏", name: "响度标准化",
+  desc: "统一到广播级响度，多个视频音量不再忽大忽小",
+  tag: "_loud", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "多段素材拼接后音量不一致、投稿平台要求统一响度时使用。使用 EBU R128 标准的 loudnorm 滤镜（单遍模式）。" },
+    { key: "target", label: "目标响度", type: "radio", flag: "loudnorm I=", default: "-16",
+      options: [
+        { value: "-14", label: "-14 LUFS（流媒体）" },
+        { value: "-16", label: "-16 LUFS（播客/视频）" },
+        { value: "-23", label: "-23 LUFS（广播）" }
+      ],
+      help: "YouTube/Spotify 用 -14，B 站与多数视频平台用 -16，电视台标准 -23。<b>数值越负整体越轻</b>。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    return { argv: ["-i", v.input, "-af", `loudnorm=I=${v.target}:TP=-1.5:LRA=11`,
+      "-ar", "48000", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", v.output] };
+  }
+},
+{
+  id: "resample", group: "音频处理", icon: "🎚️", name: "采样率 / 声道",
+  desc: "改变音频采样率与声道数，适配不同播放设备",
+  tag: "_resample", outExt: "m4a",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "常见场景：把 48kHz 转成 44.1kHz 刻 CD、把立体声混成单声道减小体积、统一素材参数便于后续剪辑。" },
+    { key: "rate", label: "采样率", type: "select", flag: "-ar", default: "48000",
+      options: ["8000","22050","44100","48000","96000"],
+      help: "每秒采样次数。CD 音质 44100，视频标准 48000，电话/语音 8000-22050。升采样不会提升音质。" },
+    { key: "channels", label: "声道", type: "select", flag: "-ac", default: "2",
+      options: ["1","2"],
+      help: "1 = 单声道（体积小，适合语音），2 = 立体声。立体声转单声道会把左右声道混合。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径（默认 m4a/AAC）。" }
+  ],
+  build(v) {
+    return { argv: ["-i", v.input, "-vn", "-ar", v.rate, "-ac", v.channels,
+      "-c:a", "aac", "-b:a", "192k", v.output] };
+  }
+},
+{
+  id: "pitch", group: "音频处理", icon: "🎹", name: "男女声变调",
+  desc: "升降调而不改变时长（男声变女声、女声变男声）",
+  tag: "_pitch", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "通过 asetrate 改变采样率来移调，再用 aresample 与 atempo 把速度拉回原样，实现<b>只变调不变速</b>。" },
+    { key: "semi", label: "升降半音", type: "range", flag: "semitones", default: 3, min: -12, max: 12,
+      help: "正值升调、负值降调。男声变女声一般 +4 到 +6 个半音，女声变男声 -4 到 -6。每次 1 个半音是一个钢琴键的距离。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const n = Number(v.semi);
+    const factor = Math.pow(2, n / 12);
+    const rate = Math.round(48000 * factor);
+    const at = (1 / factor).toFixed(6);
+    return { argv: ["-i", v.input, "-af", `asetrate=${rate},aresample=48000,atempo=${at}`,
+      "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", v.output] };
+  }
+},
+/* ==================== 组合工具（补充） ==================== */
+{
+  id: "metadata", group: "组合工具", icon: "🏷️", name: "元数据编辑",
+  desc: "修改标题、作者、专辑等信息，或彻底清除元数据",
+  tag: "_meta", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "元数据是文件里的「标签」，播放器与系统属性里看到的标题、作者就来自这里。全流程 -c copy 不重编码，秒完成。" },
+    { key: "title", label: "标题", type: "text", placeholder: "留空则不修改",
+      help: "写入 title 字段，播放器标题栏与资源管理器都会显示。" },
+    { key: "artist", label: "作者 / 艺术家", type: "text", placeholder: "留空则不修改",
+      help: "写入 artist 字段。" },
+    { key: "album", label: "专辑", type: "text", placeholder: "留空则不修改", advanced: true,
+      help: "写入 album 字段，音乐文件常用。" },
+    { key: "comment", label: "备注", type: "text", placeholder: "留空则不修改", advanced: true,
+      help: "写入 comment 字段，可用于写版权说明或来源。" },
+    { key: "clear", label: "先清除全部原有元数据", type: "switch", flag: "-map_metadata -1", default: false,
+      help: "开启后丢弃源文件的全部元数据（含拍摄设备、GPS、软件信息），<b>适合发布前脱敏</b>，再写入上面填的新值。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const a = ["-i", v.input, "-c", "copy"];
+    if (v.clear) a.push("-map_metadata", "-1");
+    if (v.title) a.push("-metadata", `title=${v.title}`);
+    if (v.artist) a.push("-metadata", `artist=${v.artist}`);
+    if (v.album) a.push("-metadata", `album=${v.album}`);
+    if (v.comment) a.push("-metadata", `comment=${v.comment}`);
+    a.push(v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "frames", group: "组合工具", icon: "🖼️", name: "导出图片序列",
+  desc: "按固定间隔抽帧，批量导出 PNG/JPG 图片",
+  tag: "_frames", outExt: "png", seq: "%04d",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "用于做缩略图、视频分镜、逐帧分析。输出文件名会自动带序号（如 video_frames_0001.png）。" },
+    { key: "start", label: "开始时间", type: "text", flag: "-ss", default: "00:00:00", placeholder: "如 00:00:05",
+      help: "从该时间点开始抽帧。" },
+    { key: "duration", label: "抽帧时长", type: "text", flag: "-t", placeholder: "留空则整段视频",
+      help: "限定抽帧的时间范围，留空表示处理全片。" },
+    { key: "fps", label: "抽帧频率", type: "range", flag: "fps=", default: 1, min: 1, max: 30, unit: " 帧/秒",
+      help: "每秒抽几帧。1 表示每秒一张（10 秒视频出 10 张），30 则接近逐帧导出，图片数量会暴涨。" },
+    { key: "format", label: "图片格式", type: "radio", default: "png",
+      options: [{ value: "png", label: "PNG（无损）" }, { value: "jpg", label: "JPG（小体积）" }],
+      help: "分镜存档用 PNG，批量预览用 JPG 更省空间。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "图片序列的命名模板，<b>%04d 会被替换为 0001、0002…</b>，请勿删掉序号占位符。" }
+  ],
+  build(v) {
+    const a = [];
+    if (v.start) a.push("-ss", v.start);
+    if (v.duration) a.push("-t", v.duration);
+    a.push("-i", v.input, "-vf", `fps=${v.fps}`, v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "segment", group: "组合工具", icon: "🧩", name: "视频分段切割",
+  desc: "按固定时长自动切成多个小文件",
+  tag: "_part", outExt: "mp4", seq: "%03d",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "适合把长视频切成分集、拆分超长录播。采用 stream copy，<b>不重编码、速度快</b>，但切点会落在关键帧上（可能有几秒偏差）。" },
+    { key: "seconds", label: "每段时长 (秒)", type: "number", default: 600,
+      help: "每段的目标秒数，600 即 10 分钟一段。实际切点受关键帧间隔影响。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "分段命名模板，<b>%03d 会递增为 001、002…</b>，请保留占位符。" }
+  ],
+  build(v) {
+    return { argv: ["-i", v.input, "-c", "copy", "-map", "0", "-f", "segment",
+      "-segment_time", String(v.seconds), "-reset_timestamps", "1", v.output] };
+  }
+},
+{
+  id: "img2video", group: "组合工具", icon: "🌄", name: "图片转视频",
+  desc: "把一张图片（或封面）转成可播放的视频",
+  tag: "_imgvid", outExt: "mp4",
+  params: [
+    { key: "input", label: "图片文件", type: "file", required: true, filter: IMAGE_FILTER,
+      help: "常见用途：把海报做成 10 秒视频发平台、给音频配一张封面图、制作静态背景板。" },
+    { key: "duration", label: "时长 (秒)", type: "number", default: 10,
+      help: "生成的视频长度。" },
+    { key: "fps", label: "帧率", type: "select", flag: "-r", default: "30",
+      options: ["24","25","30","60"],
+      help: "静态图用 30 即可；平台要求 25 或 60 时按需选择。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "视频的保存路径。" }
+  ],
+  build(v) {
+    return { argv: ["-loop", "1", "-i", v.input, "-t", String(v.duration), "-r", v.fps,
+      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264", "-crf", "20",
+      "-pix_fmt", "yuv420p", v.output] };
+  }
+},
+{
+  id: "record", group: "组合工具", icon: "⏺️", name: "屏幕录制",
+  desc: "录制全屏或指定区域（Windows gdigrab）",
+  tag: "_rec", outExt: "mp4",
+  params: [
+    { key: "region", label: "录制范围", type: "radio", default: "full",
+      options: [
+        { value: "full", label: "整个屏幕" },
+        { value: "area", label: "指定区域" }
+      ],
+      help: "全屏录制用 desktop 输入；指定区域需要给出左上角坐标与宽高。<b>多显示器时全屏通常只录主屏</b>。" },
+    { key: "x", label: "起点 X", type: "number", default: 0, placeholder: "0",
+      help: "区域左上角的横坐标（像素）。" },
+    { key: "y", label: "起点 Y", type: "number", default: 0, placeholder: "0",
+      help: "区域左上角的纵坐标（像素）。" },
+    { key: "w", label: "宽度", type: "number", default: 1280, placeholder: "1280",
+      help: "录制区域宽度，建议为偶数。" },
+    { key: "h", label: "高度", type: "number", default: 720, placeholder: "720",
+      help: "录制区域高度，建议为偶数。" },
+    { key: "framerate", label: "帧率", type: "select", flag: "-framerate", default: "30",
+      options: ["15","24","30","60"],
+      help: "屏幕录制 15-30 帧足够；录游戏或动画建议 60。<b>帧率越高文件越大</b>。" },
+    { key: "duration", label: "录制时长 (秒)", type: "text", flag: "-t", placeholder: "留空则手动停止",
+      help: "留空则一直录制，直到你点「停止任务」。填了时长就到点自动结束。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "录制文件的保存路径。录制的是实时画面，<b>点停止后文件才会完整写入</b>。" }
+  ],
+  build(v) {
+    const a = ["-f", "gdigrab", "-framerate", v.framerate];
+    if (v.region === "area") {
+      a.push("-offset_x", String(v.x), "-offset_y", String(v.y),
+             "-video_size", `${v.w}x${v.h}`);
+    }
+    a.push("-i", "desktop");
+    if (v.duration) a.push("-t", v.duration);
+    a.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", v.output);
+    return { argv: a };
+  }
 }
 ];
 
@@ -429,10 +955,15 @@ function stem(p) {
   return i > 0 ? base.slice(0, i) : base;
 }
 
-function genOutput(feature, inputPath) {
-  if (!feature.outExt) return "";
+function genOutput(feature, inputPath, extOverride) {
+  const ext = extOverride || feature.outExt;
+  if (!ext) return "";
   const name = inputPath ? stem(inputPath) : "output";
-  return `${OUTPUT_DIR}\\${name}${feature.tag}.${feature.outExt}`;
+  if (feature.seq) {
+    // 序列类输出：name_0001.png / name_001.mp4
+    return `${OUTPUT_DIR}\\${name}${feature.tag}_${feature.seq}.${ext}`;
+  }
+  return `${OUTPUT_DIR}\\${name}${feature.tag}.${ext}`;
 }
 
 function highlightCmd(text) {
@@ -445,6 +976,8 @@ function highlightCmd(text) {
 }
 
 /* ---------------- 导航渲染 ---------------- */
+const GROUP_ORDER = ["视频处理", "音频处理", "字幕与叠加", "图像与 GIF", "组合工具"];
+
 function renderNav(filter = "") {
   const nav = $("#feature-nav");
   nav.innerHTML = "";
@@ -453,7 +986,12 @@ function renderNav(filter = "") {
     if (filter && !f.name.includes(filter) && !f.desc.includes(filter)) return;
     (groups[f.group] = groups[f.group] || []).push(f);
   });
-  Object.entries(groups).forEach(([g, items]) => {
+  const ordered = Object.keys(groups).sort((a, b) => {
+    const ia = GROUP_ORDER.indexOf(a), ib = GROUP_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  ordered.forEach(g => {
+    const items = groups[g];
     const gd = document.createElement("div");
     gd.className = "nav-group";
     gd.innerHTML = `<div class="nav-group-title">${esc(g)}</div>`;
@@ -633,6 +1171,42 @@ function renderParams(f) {
 
   autoFillOutput(f);
   updatePreview();
+  applyHwAvailability(f);
+}
+
+/* 硬件编码器可用性检测：本机不支持的会标灰 */
+let HW_STATUS = null;
+async function applyHwAvailability(f) {
+  if (f.id !== "hwaccel") return;
+  const group = document.querySelector('.radio-cards[data-key="encoder"]');
+  if (!group) return;
+  const cards = [...group.querySelectorAll(".radio-card")];
+  cards.forEach(c => { if (!c.dataset.orig) c.dataset.orig = c.textContent; });
+  if (!HW_STATUS) {
+    cards.forEach(c => { c.textContent = c.dataset.orig + " …"; });
+    try {
+      const r = await fetch("/api/hw-encoders").then(r => r.json());
+      HW_STATUS = r.ok ? r.encoders : {};
+    } catch (e) { HW_STATUS = {}; }
+    if (currentFeature !== f) return;
+  }
+  cards.forEach(c => {
+    const ok = HW_STATUS[c.dataset.value];
+    c.textContent = c.dataset.orig + (ok ? " ✓" : " ✕ 本机不可用");
+    c.classList.toggle("unavailable", !ok);
+    c.title = ok ? "该编码器在本机可用" : "本机未检测到该编码器，执行会报错；可改用 CPU 编码（格式转换 / 视频压缩）";
+  });
+
+  // 当前选中的编码器不可用时，自动切到第一个可用的
+  const checked = group.querySelector(".radio-card.checked");
+  if (checked && !HW_STATUS[checked.dataset.value]) {
+    const firstOk = cards.find(c => HW_STATUS[c.dataset.value]);
+    if (firstOk) {
+      checked.classList.remove("checked");
+      firstOk.classList.add("checked");
+      updatePreview();
+    }
+  }
 }
 
 function getValue(f, key) {
@@ -659,7 +1233,13 @@ function autoFillOutput(f) {
   if (!outEl) return;
   const inputKey = f.params.find(p => p.type === "file");
   const inputPath = inputKey ? getValue(f, inputKey.key) : "";
-  outEl.value = genOutput(f, inputPath);
+  // 扩展名联动（如字幕封装随容器切换 mp4/mkv）
+  let ext = null;
+  if (f.extMap) {
+    const [key, map] = f.extMap;
+    ext = map[getValue(f, key)] || null;
+  }
+  outEl.value = genOutput(f, inputPath, ext);
 }
 
 function onParamChange() {

@@ -59,6 +59,24 @@ def api_version():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@app.route("/api/hw-encoders")
+def api_hw_encoders():
+    """实测各硬件编码器是否可用（1 帧试编码，快速失败）"""
+    encoders = ["h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv", "h264_amf", "hevc_amf"]
+    result = {}
+    for enc in encoders:
+        try:
+            r = subprocess.run(
+                [FFMPEG_BIN, "-hide_banner", "-v", "error", "-f", "lavfi",
+                 "-i", "color=c=black:s=64x64:d=0.1", "-frames:v", "1",
+                 "-c:v", enc, "-f", "null", "-"],
+                capture_output=True, text=True, timeout=15)
+            result[enc] = (r.returncode == 0)
+        except Exception:
+            result[enc] = False
+    return jsonify({"ok": True, "encoders": result})
+
+
 @app.route("/api/probe", methods=["POST"])
 def api_probe():
     path = (request.json or {}).get("path", "").strip().strip('"')
