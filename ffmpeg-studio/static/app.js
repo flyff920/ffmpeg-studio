@@ -755,6 +755,7 @@ async function runCurrent() {
   const f = currentFeature;
   if (!f) return;
   $("#log-console").classList.remove("hidden");
+  $("#log-toggle-arrow").textContent = "▾";
   $("#log-body").textContent = "";
 
   // 探测功能走 ffprobe
