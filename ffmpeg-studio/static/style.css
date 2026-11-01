@@ -288,6 +288,7 @@ body {
 .log-status.running { color: var(--primary); font-weight: 600; }
 .log-status.success { color: var(--success); font-weight: 600; }
 .log-status.error { color: var(--danger); font-weight: 600; }
+.log-status.warn { color: var(--warning, #f5a623); font-weight: 600; }
 .spacer { flex: 1; }
 .log-body {
   height: 130px; overflow-y: auto;
@@ -406,9 +407,10 @@ body {
   border-radius: 9px; padding: 9px 12px; margin-bottom: 9px;
   background: #fff; transition: border-color .15s, background .15s;
 }
-.batch-item.running { border-left-color: var(--primary); background: #f6f8ff; }
+.batch-item.run, .batch-item.running { border-left-color: var(--primary); background: #f6f8ff; }
 .batch-item.ok { border-left-color: var(--success); background: #f4fbf7; }
 .batch-item.fail { border-left-color: var(--danger); background: #fdf5f6; }
+.batch-item.stop { border-left-color: var(--warning, #f5a623); background: #fffaf2; }
 .batch-item-top { display: flex; align-items: center; gap: 8px; }
 .batch-idx {
   flex: none; width: 18px; height: 18px; border-radius: 5px;
@@ -420,9 +422,10 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .batch-status { flex: none; font-size: 11px; color: var(--text-3); }
-.batch-item.running .batch-status { color: var(--primary); font-weight: 600; }
+.batch-item.run .batch-status, .batch-item.running .batch-status { color: var(--primary); font-weight: 600; }
 .batch-item.ok .batch-status { color: var(--success); font-weight: 600; }
 .batch-item.fail .batch-status { color: var(--danger); font-weight: 600; }
+.batch-item.stop .batch-status { color: var(--warning, #f5a623); font-weight: 600; }
 .batch-item-path, .batch-item-out {
   font-size: 11px; font-family: Consolas, monospace;
   color: var(--text-3); margin-top: 4px; word-break: break-all;

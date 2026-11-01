@@ -920,11 +920,19 @@ const FEATURES = [
       help: "录制区域高度，建议为偶数。" },
     { key: "framerate", label: "帧率", type: "select", flag: "-framerate", default: "30",
       options: ["15","24","30","60"],
-      help: "屏幕录制 15-30 帧足够；录游戏或动画建议 60。<b>帧率越高文件越大</b>。" },
+      help: "屏幕录制 15-30 帧足够；录游戏或动画建议 60。<b>帧率越高文件越大</b>。2K/4K 全屏时若日志里 speed 低于 1.0x，说明编码跟不上采集，可降到 24/15 帧或改用硬件编码。" },
+    { key: "encoder", label: "编码器", type: "radio", default: "libx264",
+      options: [
+        { value: "libx264", label: "CPU (libx264)" },
+        { value: "h264_qsv", label: "Intel QSV 硬件" }
+      ],
+      help: "libx264 兼容性最好，但对 2K/4K 全屏来说 CPU 压力大。<b>Intel QSV</b> 用核显编码，几乎不占 CPU、帧率更稳，适合长时间录制。本机会自动检测是否可用。" },
+    { key: "crf", label: "画质 (CRF)", type: "range", default: 23, min: 18, max: 35,
+      help: "数值越小画质越好、文件越大。录屏内容以文字为主，<b>23-26</b> 已经足够清晰；录游戏画面可降到 20。" },
     { key: "duration", label: "录制时长 (秒)", type: "text", flag: "-t", placeholder: "留空则手动停止",
       help: "留空则一直录制，直到你点「停止任务」。填了时长就到点自动结束。" },
     { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
-      help: "录制文件的保存路径。录制的是实时画面，<b>点停止后文件才会完整写入</b>。" }
+      help: "录制文件的保存路径。<b>点「停止任务」时 FFmpeg 会先写完文件索引再退出</b>，所以停止后稍等一两秒，等日志出现「文件已正常收尾」再操作文件。" }
   ],
   build(v) {
     const a = ["-f", "gdigrab", "-framerate", v.framerate];
@@ -934,7 +942,14 @@ const FEATURES = [
     }
     a.push("-i", "desktop");
     if (v.duration) a.push("-t", v.duration);
-    a.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", v.output);
+    if (v.encoder === "h264_qsv") {
+      a.push("-c:v", "h264_qsv", "-preset", "veryfast",
+             "-global_quality", String(v.crf || 23));
+    } else {
+      a.push("-c:v", "libx264", "-preset", "ultrafast",
+             "-crf", String(v.crf || 23), "-pix_fmt", "yuv420p");
+    }
+    a.push(v.output);
     return { argv: a };
   }
 },
@@ -1586,31 +1601,34 @@ function renderParams(f) {
 
 /* 硬件编码器可用性检测：本机不支持的会标灰 */
 let HW_STATUS = null;
+const HW_CODECS = ["h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv", "h264_amf", "hevc_amf"];
 async function applyHwAvailability(f) {
-  if (f.id !== "hwaccel") return;
   const group = document.querySelector('.radio-cards[data-key="encoder"]');
   if (!group) return;
   const cards = [...group.querySelectorAll(".radio-card")];
-  cards.forEach(c => { if (!c.dataset.orig) c.dataset.orig = c.textContent; });
+  // 只标记真正的硬件编码器，CPU 编码器不参与可用性判断
+  const hwCards = cards.filter(c => HW_CODECS.includes(c.dataset.value));
+  if (!hwCards.length) return;
+  hwCards.forEach(c => { if (!c.dataset.orig) c.dataset.orig = c.textContent; });
   if (!HW_STATUS) {
-    cards.forEach(c => { c.textContent = c.dataset.orig + " …"; });
+    hwCards.forEach(c => { c.textContent = c.dataset.orig + " …"; });
     try {
       const r = await fetch("/api/hw-encoders").then(r => r.json());
       HW_STATUS = r.ok ? r.encoders : {};
     } catch (e) { HW_STATUS = {}; }
     if (currentFeature !== f) return;
   }
-  cards.forEach(c => {
+  hwCards.forEach(c => {
     const ok = HW_STATUS[c.dataset.value];
     c.textContent = c.dataset.orig + (ok ? " ✓" : " ✕ 本机不可用");
     c.classList.toggle("unavailable", !ok);
-    c.title = ok ? "该编码器在本机可用" : "本机未检测到该编码器，执行会报错；可改用 CPU 编码（格式转换 / 视频压缩）";
+    c.title = ok ? "该编码器在本机可用" : "本机未检测到该编码器，执行会报错；可改用 CPU 编码";
   });
 
-  // 当前选中的编码器不可用时，自动切到第一个可用的
+  // 当前选中的是硬件编码器但不可用时，自动切到第一个可用的
   const checked = group.querySelector(".radio-card.checked");
-  if (checked && !HW_STATUS[checked.dataset.value]) {
-    const firstOk = cards.find(c => HW_STATUS[c.dataset.value]);
+  if (checked && HW_CODECS.includes(checked.dataset.value) && !HW_STATUS[checked.dataset.value]) {
+    const firstOk = hwCards.find(c => HW_STATUS[c.dataset.value]);
     if (firstOk) {
       checked.classList.remove("checked");
       firstOk.classList.add("checked");
@@ -1764,6 +1782,8 @@ function setStatus(text, cls) {
 
 /* ---------------- 执行 ---------------- */
 let running = false;
+let userStopped = false;   // 本次执行是否由用户主动停止
+let stopPending = false;   // 已发出停止请求，正在等待收尾
 
 function openLog() {
   $("#log-console").classList.remove("hidden");
@@ -1774,6 +1794,12 @@ function setRunningUI(on, batch = false) {
   running = on;
   $("#btn-run").classList.toggle("hidden", on);
   $("#btn-stop").classList.toggle("hidden", !on);
+  if (!on) {
+    // 恢复停止按钮文案（执行中可能被改成「强制停止」）
+    const sb = $("#btn-stop"); if (sb) sb.textContent = "⏹ 停止任务";
+    const bb = $("#btn-batch-stop"); if (bb) bb.textContent = "⏹ 停止";
+    stopPending = false;
+  }
   if (batch) {
     $("#btn-batch-run").classList.toggle("hidden", on);
     $("#btn-batch-stop").classList.toggle("hidden", !on);
@@ -1814,6 +1840,7 @@ function runStep(argv, cwd) {
       } else if (msg.type === "exit") {
         if (eventSource) { eventSource.close(); eventSource = null; }
         currentTaskId = null;
+        if (msg.stopped) userStopped = true;
         resolve(msg.code);
       }
     };
@@ -1889,10 +1916,15 @@ async function runCurrent() {
 
   setRunningUI(true);
   setStatus("⏳ 执行中…", "running");
+  userStopped = false;
+  stopPending = false;
   const code = await executeSteps(steps, v.output ? dirname(v.output) : "");
   setRunningUI(false);
+  stopPending = false;
 
-  if (code === 0) {
+  if (userStopped) {
+    await finishStopped(v.output, code);
+  } else if (code === 0) {
     setStatus("✅ 执行成功", "success");
     log("\n✅ 任务完成！", "#22b07d");
     if (v.output) log(`📁 输出文件: ${v.output}`, "#22b07d");
@@ -1902,11 +1934,48 @@ async function runCurrent() {
   }
 }
 
+/** 用户主动停止后的收尾：检查文件是否完整可播 */
+async function finishStopped(outputPath, code) {
+  setStatus("⏹ 已停止", "warn");
+  log("\n⏹ 任务已按你的操作停止", "#f5a623");
+  if (!outputPath) return;
+
+  // 停止后校验文件：能读出时长说明收尾正常
+  let info = null;
+  try {
+    const r = await fetch("/api/probe", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: outputPath }) }).then(r => r.json());
+    if (r.ok) info = r.data;
+  } catch (e) { /* 忽略 */ }
+
+  if (info && Number((info.format || {}).duration || 0) > 0) {
+    const sec = Number(info.format.duration).toFixed(1);
+    log(`✅ 文件已正常收尾，可播放（时长 ${sec} 秒）`, "#22b07d");
+    log(`📁 输出文件: ${outputPath}`, "#22b07d");
+  } else {
+    // 强制结束或进程被外部终止时才会走到这里
+    log("⚠ 输出文件可能不完整（未写入索引），请重新录制/处理后正常停止", "#ef4b5f");
+    log("💡 提示：停止按钮第一次是「正常收尾」，等收尾完成文件才完整；连点两次才会强制结束。", "#8a99ad");
+  }
+}
+
 async function stopCurrent() {
   if (!currentTaskId) return;
+  const force = stopPending;   // 第二次点击 = 强制结束
+
+  if (force) {
+    log("\n🛑 强制结束进程（输出文件可能不完整）", "#ef4b5f");
+  } else {
+    userStopped = true;
+    stopPending = true;
+    setStatus("⏳ 正在收尾…", "running");
+    log("\n⏹ 收到停止请求，正在让 FFmpeg 写完文件索引（稍等一下）…", "#f5a623");
+    const btn = $("#btn-stop");
+    if (btn) btn.textContent = "🛑 强制停止";
+  }
+
   await fetch("/api/stop", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: currentTaskId }) });
-  log("\n⏹ 用户手动停止任务", "#f5a623");
+    body: JSON.stringify({ id: currentTaskId, force }) });
 }
 
 /* ---------------- 批量队列 ---------------- */
@@ -1932,7 +2001,7 @@ function renderBatchList() {
     list.innerHTML = '<div class="empty-tip">队列为空<br><span style="font-size:12px;color:#8a99ad">点「＋ 添加文件」一次把多个素材加进来</span></div>';
     return;
   }
-  const LBL = { wait: "待处理", run: "运行中…", ok: "✓ 成功", fail: "✕ 失败" };
+  const LBL = { wait: "待处理", run: "运行中…", ok: "✓ 成功", fail: "✕ 失败", stop: "⏹ 已停止" };
   list.innerHTML = batchItems.map((it, i) => `
     <div class="batch-item ${it.status}">
       <div class="batch-item-top">
@@ -1986,15 +2055,18 @@ async function runBatch() {
 
   batchItems.forEach(it => { it.status = "wait"; it.out = ""; });
   batchStopFlag = false;
+  userStopped = false;
+  stopPending = false;
   renderBatchList();
   setRunningUI(true, true);
+  setStatus("⏳ 批量执行中…", "running");
   openLog();
   log(`📚 批量队列开始：共 ${batchItems.length} 个文件 · 功能「${f.name}」`, "#7cc7ff");
 
-  let okCount = 0, failCount = 0;
+  let okCount = 0, failCount = 0, stopCount = 0;
   for (let i = 0; i < batchItems.length; i++) {
     const it = batchItems[i];
-    if (batchStopFlag) continue;
+    if (batchStopFlag) { it.status = "stop"; stopCount++; continue; }
     const v = { ...baseVals, [fileKey]: it.path };
     if (outParam) v[outParam.key] = genOutput(f, it.path, extFor(f, v));
     it.out = outParam ? v[outParam.key] : "";
@@ -2011,15 +2083,27 @@ async function runBatch() {
       continue;
     }
     const code = await executeSteps(steps, it.out ? dirname(it.out) : "");
-    if (code === 0) { it.status = "ok"; okCount++; }
+    if (userStopped) {
+      it.status = "stop"; stopCount++;
+      log("⏹ 该文件已按你的操作停止（输出已收尾）", "#f5a623");
+    } else if (code === 0) { it.status = "ok"; okCount++; }
     else { it.status = "fail"; failCount++; log(`❌ 该文件失败（退出码 ${code}），继续下一个`, "#ef4b5f"); }
     renderBatchList();
   }
 
   setRunningUI(false, true);
-  const msg = `批量完成：成功 ${okCount} 个，失败 ${failCount} 个` + (batchStopFlag ? "（已手动停止）" : "");
-  setStatus(msg, failCount ? "error" : "success");
-  log("\n" + (failCount ? "⚠ " : "✅ ") + msg, failCount ? "#f5a623" : "#22b07d");
+  // 剩余未处理的文件标记为「已停止」
+  if (batchStopFlag) {
+    batchItems.forEach(it => { if (it.status === "wait") { it.status = "stop"; stopCount++; } });
+    renderBatchList();
+  }
+  const parts = [`成功 ${okCount} 个`];
+  if (failCount) parts.push(`失败 ${failCount} 个`);
+  if (stopCount) parts.push(`已停止 ${stopCount} 个`);
+  const msg = `批量${batchStopFlag ? "已停止" : "完成"}：` + parts.join("，");
+  setStatus(msg, batchStopFlag ? "warn" : (failCount ? "error" : "success"));
+  log("\n" + (batchStopFlag ? "⏹ " : (failCount ? "⚠ " : "✅ ")) + msg,
+      batchStopFlag ? "#f5a623" : (failCount ? "#f5a623" : "#22b07d"));
 }
 
 function stopBatch() {

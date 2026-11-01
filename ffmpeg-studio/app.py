@@ -157,6 +157,39 @@ def _reader_thread(task_id, proc, q):
     except Exception as e:
         q.put(("log", "[读取错误] %s" % e))
         q.put(("exit", -1))
+    finally:
+        # 进程已退出，释放 stdin 管道句柄
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+
+
+def _stop_watchdog(task_id, proc, grace=12.0, hard=4.0):
+    """优雅停止的兜底：q 发出后长时间不收尾，则升级 terminate → kill"""
+    try:
+        proc.wait(timeout=grace)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with TASKS_LOCK:
+        task = TASKS.get(task_id)
+    if task and task.get("force"):
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        return
+    try:
+        proc.wait(timeout=hard)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 @app.route("/api/run", methods=["POST"])
@@ -171,14 +204,17 @@ def api_run():
 
     # 工作目录：DASH 等封装器会把分片写到进程 cwd，指到输出目录才不会散落
     cwd = (body.get("cwd") or "").strip()
-    if cwd and not os.path.isdir(cwd):
-        cwd = None
+    if not cwd or not os.path.isdir(cwd):
+        cwd = None   # 空字符串传给 Windows Popen 会报 WinError 123
 
     task_id = uuid.uuid4().hex[:12]
     q = queue.Queue()
     try:
         proc = subprocess.Popen(
             full_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            # stdin 管道：停止时写 q 让 ffmpeg 自己收尾（写完 moov 索引再退出），
+            # 否则 MP4/MOV 被强杀会留下无索引的坏文件
+            stdin=subprocess.PIPE,
             cwd=cwd,
             text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
@@ -186,7 +222,8 @@ def api_run():
         return jsonify({"ok": False, "error": "启动失败: %s" % e})
 
     with TASKS_LOCK:
-        TASKS[task_id] = {"proc": proc, "queue": q, "done": False, "code": None}
+        TASKS[task_id] = {"proc": proc, "queue": q, "done": False, "code": None,
+                          "stopped": False, "force": False}
     threading.Thread(target=_reader_thread, args=(task_id, proc, q), daemon=True).start()
     return jsonify({"ok": True, "id": task_id})
 
@@ -212,7 +249,9 @@ def api_stream(task_id):
                 with TASKS_LOCK:
                     task["done"] = True
                     task["code"] = payload
-                yield "data: %s\n\n" % json.dumps({"type": "exit", "code": payload})
+                yield "data: %s\n\n" % json.dumps(
+                    {"type": "exit", "code": payload,
+                     "stopped": bool(task.get("stopped"))})
                 break
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -220,15 +259,43 @@ def api_stream(task_id):
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
-    task_id = (request.json or {}).get("id", "")
+    """停止任务。默认发 q 让 ffmpeg 正常收尾（文件可播），force=True 直接杀进程"""
+    body = request.json or {}
+    task_id = body.get("id", "")
+    force = bool(body.get("force"))
     with TASKS_LOCK:
         task = TASKS.get(task_id)
-    if task and not task["done"]:
+    if not task or task["done"]:
+        return jsonify({"ok": True, "already": True})
+
+    proc = task["proc"]
+    task["stopped"] = True
+
+    if force:
+        task["force"] = True
         try:
-            task["proc"].terminate()
+            proc.kill()
         except Exception:
             pass
-    return jsonify({"ok": True})
+        return jsonify({"ok": True, "mode": "kill"})
+
+    # 首选：向 stdin 写 q —— ffmpeg 会停止读流、写完文件索引后正常退出
+    mode = "graceful"
+    try:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.write("q")
+            proc.stdin.flush()
+        else:
+            raise RuntimeError("stdin 不可用")
+    except Exception:
+        mode = "terminate"
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    threading.Thread(target=_stop_watchdog, args=(task_id, proc), daemon=True).start()
+    return jsonify({"ok": True, "mode": mode})
 
 
 @app.route("/api/outputs")
