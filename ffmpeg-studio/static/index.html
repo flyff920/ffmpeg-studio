@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FFmpeg Studio - 可视化音视频工具箱</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 顶栏 -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">▶</div>
+    <div class="brand-text">
+      <h1>FFmpeg Studio</h1>
+      <span class="subtitle">可视化音视频工具箱</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="badge" id="ffmpeg-version">FFmpeg 检测中…</span>
+    <button class="btn btn-ghost" id="btn-outputs" title="查看输出目录">📂 输出目录</button>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- 左侧功能导航 -->
+  <aside class="sidebar">
+    <div class="sidebar-search">
+      <input type="text" id="feature-search" placeholder="🔍 搜索功能…">
+    </div>
+    <nav id="feature-nav"></nav>
+  </aside>
+
+  <!-- 主区域 -->
+  <main class="main">
+    <!-- 功能标题区 -->
+    <section class="feature-header" id="feature-header">
+      <div class="feature-icon" id="feature-icon">🎬</div>
+      <div>
+        <h2 id="feature-name">选择一个功能</h2>
+        <p id="feature-desc">从左侧选择要执行的 FFmpeg 操作</p>
+      </div>
+    </section>
+
+    <!-- 参数表单区 -->
+    <section class="params-panel" id="params-panel"></section>
+
+    <!-- 命令预览区（吸底） -->
+    <section class="command-dock">
+      <div class="command-head">
+        <span class="cmd-label">
+          <span class="pulse-dot"></span> 完整命令预览
+          <span class="cmd-hint">（实时生成 · 与实际执行完全一致）</span>
+        </span>
+        <div class="cmd-actions">
+          <button class="btn btn-mini" id="btn-copy-cmd">📋 复制命令</button>
+          <button class="btn btn-mini" id="btn-toggle-log">📜 日志 <span id="log-toggle-arrow">▾</span></button>
+        </div>
+      </div>
+      <pre class="command-preview" id="command-preview"><span class="cmd-empty">请先填写参数…</span></pre>
+
+      <!-- 日志控制台 -->
+      <div class="log-console" id="log-console">
+        <div class="log-toolbar">
+          <span class="log-status" id="log-status">就绪</span>
+          <span class="spacer"></span>
+          <button class="btn btn-mini" id="btn-clear-log">清空</button>
+        </div>
+        <pre class="log-body" id="log-body"></pre>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="action-bar">
+        <button class="btn btn-primary btn-lg" id="btn-run">▶ 开始执行</button>
+        <button class="btn btn-danger btn-lg hidden" id="btn-stop">⏹ 停止任务</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 输出目录抽屉 -->
+<div class="drawer-mask hidden" id="drawer-mask"></div>
+<div class="drawer hidden" id="outputs-drawer">
+  <div class="drawer-head">
+    <h3>📂 输出文件</h3>
+    <button class="btn btn-mini" id="btn-close-drawer">✕</button>
+  </div>
+  <div class="drawer-body" id="outputs-list"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

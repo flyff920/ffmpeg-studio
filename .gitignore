@@ -1,0 +1,23 @@
+# ===== FFmpeg Studio =====
+
+# 输出文件（运行时生成，体积大，不入库）
+ffmpeg-studio/outputs/
+
+# 临时上传的测试/待处理文件
+ffmpeg-studio/uploads/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# 编辑器 / 系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# WorkBuddy 本地工作区数据
+.workbuddy/
