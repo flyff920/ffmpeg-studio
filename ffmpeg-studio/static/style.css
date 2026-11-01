@@ -354,3 +354,78 @@ body {
 ::-webkit-scrollbar-thumb { background: #c8d2e0; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #a8b6cc; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ===== 次级按钮 / 角标 ===== */
+.btn-secondary {
+  background: #fff; color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 600;
+}
+.btn-secondary:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.btn-secondary:disabled { opacity: .5; cursor: not-allowed; }
+.badge-count {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  background: var(--primary); color: #fff;
+  border-radius: 9px; font-size: 11px; font-weight: 700;
+}
+
+/* ===== 多步骤命令预览 ===== */
+.cmd-step {
+  color: #ffc46b; font-size: 11px; letter-spacing: .5px;
+  text-transform: none; opacity: .95;
+}
+.command-preview { max-height: 165px; }
+.command-preview.multi { max-height: 230px; }
+
+/* ===== 批量队列抽屉 ===== */
+.drawer-batch { width: 460px; }
+.batch-info {
+  padding: 12px 20px; background: #f7f9ff; border-bottom: 1px solid var(--border);
+}
+.batch-cur { font-size: 13px; color: var(--text-2); }
+.batch-cur b { color: var(--primary); }
+.batch-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.6; margin-top: 5px; }
+.batch-hint code {
+  background: #eaeefb; color: #4f6ef7; padding: 0 4px; border-radius: 3px;
+  font-family: Consolas, monospace;
+}
+.batch-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 20px; border-bottom: 1px solid var(--border); background: #fff;
+}
+.batch-count { font-size: 12px; color: var(--text-3); }
+.batch-footer {
+  padding: 12px 20px; border-top: 1px solid var(--border);
+  display: flex; gap: 10px; background: #fff;
+}
+.batch-footer .btn { flex: 1; justify-content: center; }
+
+.batch-item {
+  border: 1px solid var(--border); border-left: 3px solid #d5dce8;
+  border-radius: 9px; padding: 9px 12px; margin-bottom: 9px;
+  background: #fff; transition: border-color .15s, background .15s;
+}
+.batch-item.running { border-left-color: var(--primary); background: #f6f8ff; }
+.batch-item.ok { border-left-color: var(--success); background: #f4fbf7; }
+.batch-item.fail { border-left-color: var(--danger); background: #fdf5f6; }
+.batch-item-top { display: flex; align-items: center; gap: 8px; }
+.batch-idx {
+  flex: none; width: 18px; height: 18px; border-radius: 5px;
+  background: #eef1f7; color: var(--text-3); font-size: 11px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.batch-file {
+  flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.batch-status { flex: none; font-size: 11px; color: var(--text-3); }
+.batch-item.running .batch-status { color: var(--primary); font-weight: 600; }
+.batch-item.ok .batch-status { color: var(--success); font-weight: 600; }
+.batch-item.fail .batch-status { color: var(--danger); font-weight: 600; }
+.batch-item-path, .batch-item-out {
+  font-size: 11px; font-family: Consolas, monospace;
+  color: var(--text-3); margin-top: 4px; word-break: break-all;
+  padding-left: 26px;
+}
+.batch-item-out { color: #22a06b; }

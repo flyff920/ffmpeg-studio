@@ -937,6 +937,389 @@ const FEATURES = [
     a.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", v.output);
     return { argv: a };
   }
+},
+
+/* ==================== 特效与修复 ==================== */
+{
+  id: "chromakey", group: "特效与修复", icon: "🟩", name: "色键抠图",
+  desc: "把绿幕/蓝幕抠掉，换成图片或视频背景",
+  tag: "_keyed", outExt: "mp4",
+  params: [
+    { key: "input", label: "前景视频（带绿幕）", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要抠像的视频。<b>拍摄要点</b>：幕布要均匀打光、别有褶皱阴影，人物离幕布远一点减少绿色溢色，抠出来边缘才干净。" },
+    { key: "bg", label: "背景素材", type: "file", required: true,
+      filter: "背景素材|*.png;*.jpg;*.jpeg;*.bmp;*.mp4;*.mov;*.mkv;*.webm|所有文件 (*.*)|*.*",
+      help: "抠掉原背景后用来填充的画面。图片会循环静止播放；视频则与前景同步，按 <b>shortest</b> 规则取较短的那个长度。" },
+    { key: "bgType", label: "背景素材类型", type: "radio", default: "image",
+      options: [{ value: "image", label: "图片（循环静止）" }, { value: "video", label: "视频" }],
+      help: "选图片时会自动加 <b>-loop 1</b>，让一张静图铺满整段视频；选视频则当作普通第二路输入。" },
+    { key: "color", label: "抠除的颜色", type: "text", default: "0x00FF00", placeholder: "0x00FF00 或 blue",
+      help: "要变成透明的颜色。<b>0x00FF00</b> 是纯绿，<b>0x0000FF</b> 是纯蓝。如果幕布不是标准色，用取色器取出十六进制值填进来更准。" },
+    { key: "similarity", label: "颜色容差", type: "range", default: 0.12, min: 0.01, max: 0.6, step: 0.01,
+      help: "越大判定为「背景色」的范围越宽，抠得越彻底，但人物边缘也会被吃掉。<b>建议 0.08-0.20</b>：边缘残留绿边就调大，人物缺角就调小。" },
+    { key: "blend", label: "边缘羽化", type: "range", default: 0.05, min: 0, max: 0.5, step: 0.01,
+      help: "抠像边缘的半透明过渡宽度，能让边缘更自然、减少锯齿。<b>0 是硬边</b>，0.05-0.1 比较自然。" },
+    { key: "scaleBg", label: "背景缩放铺满画面", type: "switch", default: true,
+      help: "背景素材尺寸和前景不一致时，先等比放大再居中裁剪，避免出现黑边或画面比例错位。" },
+    { key: "w", label: "输出宽度", type: "number", default: 1920, advanced: true,
+      help: "背景缩放的目标宽度，<b>应与前景视频宽度一致</b>（不确定可用「媒体信息查看」查一下）。" },
+    { key: "h", label: "输出高度", type: "number", default: 1080, advanced: true,
+      help: "背景缩放的目标高度，应与前景视频高度一致。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "合成结果的保存路径。" }
+  ],
+  build(v) {
+    const a = ["-i", v.input];
+    if (v.bgType === "image") a.push("-loop", "1", "-i", v.bg);
+    else a.push("-i", v.bg);
+    const fc = [];
+    let bg = "1:v";
+    if (v.scaleBg) {
+      fc.push(`[1:v]scale=${v.w}:${v.h}:force_original_aspect_ratio=increase,crop=${v.w}:${v.h}[bg]`);
+      bg = "bg";
+    }
+    fc.push(`[0:v]chromakey=${v.color}:${v.similarity}:${v.blend}[ck]`);
+    fc.push(`[${bg}][ck]overlay=shortest=1[v]`);
+    a.push("-filter_complex", fc.join(";"), "-map", "[v]", "-map", "0:a?",
+      "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-shortest", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "lut", group: "特效与修复", icon: "🎨", name: "LUT 调色",
+  desc: "套用 .cube 预设，一键电影感调色",
+  tag: "_lut", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要调色的视频。LUT（Look-Up Table）是一张「颜色映射表」，把每个像素的原色查表换成新颜色，是影视调色的标准做法。" },
+    { key: "lut", label: "LUT 文件（.cube）", type: "file", required: true,
+      filter: "3D LUT|*.cube;*.3dl;*.dat|所有文件 (*.*)|*.*",
+      help: "常见的免费 LUT 站点（如 FreshLUTs、IWLTBAP）下载的 <b>.cube</b> 文件即可。注意分辨 <b>Rec.709</b> 与 <b>LOG</b> 版本——LOG 版是给灰片用的，直接套在普通视频上会发灰。" },
+    { key: "strength", label: "调色强度", type: "range", default: 100, min: 0, max: 100, unit: "%",
+      help: "100% 是完全套用 LUT。觉得太重时往下调，滤镜会用「原图 + 调色图」按比例混合，<b>保留一部分原始色彩</b>。" },
+    { key: "interp", label: "插值算法", type: "select", default: "tetrahedral", advanced: true,
+      options: [
+        { value: "tetrahedral", label: "tetrahedral（推荐）" },
+        { value: "trilinear", label: "trilinear（更快）" },
+        { value: "prism", label: "prism" }
+      ],
+      help: "LUT 是离散采样表，像素落在采样点之间需要插值。<b>tetrahedral 精度最好</b>（影视工业标准），trilinear 速度更快但色彩过渡略糙。" },
+    { key: "crf", label: "画质 (CRF)", type: "range", default: 18, min: 14, max: 30, advanced: true,
+      help: "调色会放大色带和噪点，<b>建议 CRF ≤ 20</b> 以免二次压缩损失细节。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "调色结果的保存路径。" }
+  ],
+  build(v) {
+    const lutExpr = `lut3d=file='${fpath(v.lut)}':interp=${v.interp}`;
+    const s = Number(v.strength);
+    const a = ["-i", v.input];
+    if (s >= 100) {
+      a.push("-vf", lutExpr);
+    } else {
+      const k = (s / 100).toFixed(2), inv = (1 - s / 100).toFixed(2);
+      a.push("-filter_complex",
+        `[0:v]split[a][b];[b]${lutExpr}[c];[a][c]blend=all_expr='A*${inv}+B*${k}'[v]`,
+        "-map", "[v]", "-map", "0:a?");
+    }
+    a.push("-c:v", "libx264", "-crf", String(v.crf), "-preset", "medium", "-c:a", "copy", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "deshake", group: "特效与修复", icon: "📳", name: "视频去抖动",
+  desc: "单遍 deshake 抑制手持拍摄的轻微晃动",
+  tag: "_deshake", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "手持设备拍摄、画面轻微抖动的视频。<b>deshake 是单遍处理</b>：速度快、无临时文件，但只能消掉小幅高频抖动，大幅晃动建议用「视频稳定（两遍）」。" },
+    { key: "strength", label: "搜索强度", type: "radio", default: "medium",
+      options: [
+        { value: "light", label: "轻微（±16px）" },
+        { value: "medium", label: "中等（±32px）" },
+        { value: "strong", label: "强（±64px）" },
+        { value: "insane", label: "极强（±128px）" }
+      ],
+      help: "每帧在多大范围内搜索匹配块。<b>范围越大能纠正的位移越大</b>，但计算量按面积增长，且可能把真实镜头运动误判为抖动。手机随手拍用「中等」即可。" },
+    { key: "edge", label: "边缘填充方式", type: "select", default: "mirror",
+      options: [
+        { value: "mirror", label: "mirror（镜像延伸）" },
+        { value: "clamp", label: "clamp（拉伸边缘）" },
+        { value: "blank", label: "blank（黑边）" }
+      ],
+      help: "画面被平移后四周会露出空隙。<b>mirror</b> 最自然无痕迹；clamp 会把边缘像素拉伸；blank 直接黑边（最保守但难看）。" },
+    { key: "blocksize", label: "匹配块大小", type: "select", default: "8", advanced: true,
+      options: ["4", "8", "16"],
+      help: "运动估计的块尺寸。小块对细节运动更敏感但噪声多，大块更稳但精度低。默认 8 是通用值。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const r = { light: 16, medium: 32, strong: 64, insane: 128 }[v.strength];
+    return { argv: ["-i", v.input,
+      "-vf", `deshake=rx=${r}:ry=${r}:edge=${v.edge}:blocksize=${v.blocksize}`,
+      "-c:v", "libx264", "-crf", "20", "-preset", "medium", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "stabilize", group: "特效与修复", icon: "🎯", name: "视频稳定（两遍）",
+  desc: "vidstab 先分析再补偿，效果远超单遍去抖",
+  tag: "_stable", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "需要稳定的视频。<b>这是两遍处理</b>：第 1 遍只分析抖动轨迹（很快、不输出画面），第 2 遍按轨迹反向补偿并编码。总耗时约为单遍的 1.5 倍。" },
+    { key: "shakiness", label: "抖动程度", type: "range", default: 5, min: 1, max: 10,
+      help: "告诉算法画面有多抖。<b>1=几乎不抖，5=普通手持，10=剧烈晃动</b>。填小了纠正不足，填大了会过度矫正导致画面漂移。" },
+    { key: "accuracy", label: "检测精度", type: "range", default: 9, min: 1, max: 15,
+      help: "第 1 遍的运动搜索精度。数值越大越准但分析越慢，<b>9 是官方推荐值</b>，素材差可提到 15。" },
+    { key: "smoothing", label: "平滑窗口", type: "range", default: 10, min: 1, max: 30,
+      help: "用多少帧来计算平滑后的相机路径，实际窗口是 <b>2×值+1</b> 帧。越大越稳越「像摇臂」，但大于 30 会出现画面滞后感。" },
+    { key: "zoom", label: "放大补偿", type: "range", default: 5, min: 0, max: 20, unit: "%",
+      help: "补偿平移后会露出黑边，需要放大画面裁掉。<b>5% 适合大多数素材</b>；抖动特别大时调到 10-15，注意画质会略有损失（放大后重采样）。" },
+    { key: "optzoom", label: "自动缩放", type: "select", default: "1", advanced: true,
+      options: [
+        { value: "0", label: "关闭（用上面的固定值）" },
+        { value: "1", label: "静态最优（推荐）" },
+        { value: "2", label: "动态最优（画面会轻微呼吸）" }
+      ],
+      help: "让算法自己算需要放大多少。静态最优取全程最小值、画面稳定；动态最优随抖动变化，更省画幅但会有轻微缩放呼吸感。" },
+    { key: "sharpen", label: "补偿锐化", type: "switch", default: true, advanced: true,
+      help: "稳定后的画面经过重采样会略微变糊，官方建议叠加 <b>unsharp</b> 恢复锐度，默认开启。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "稳定后视频的保存路径。中间轨迹文件会存到 outputs 目录（_vidstab_*.trf）。" }
+  ],
+  build(v) {
+    const trf = `${OUTPUT_DIR}\\${"_vidstab_" + stem(v.input)}.trf`;
+    const trfEsc = fpath(trf);
+    const pass1 = ["-i", v.input,
+      "-vf", `vidstabdetect=shakiness=${v.shakiness}:accuracy=${v.accuracy}:result='${trfEsc}'`,
+      "-f", "null", "-"];
+    let chain = `vidstabtransform=input='${trfEsc}':smoothing=${v.smoothing}:zoom=${v.zoom}:optzoom=${v.optzoom}:interpol=bicubic`;
+    if (v.sharpen) chain += ",unsharp=5:5:0.8:3:3:0.4";
+    const pass2 = ["-i", v.input, "-vf", chain,
+      "-c:v", "libx264", "-crf", "20", "-preset", "medium", "-c:a", "copy", v.output];
+    return { steps: [
+      { argv: pass1, note: "第 1 遍 · 逐帧分析抖动轨迹（不产生视频）" },
+      { argv: pass2, note: "第 2 遍 · 按轨迹反向补偿、缩放裁边并编码" }
+    ] };
+  }
+},
+{
+  id: "interp", group: "特效与修复", icon: "⏩", name: "视频补帧",
+  desc: "运动补偿插帧，把 24/30 帧提升到 60/120 帧",
+  tag: "_interp", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "需要提升流畅度的视频。原理是在相邻两帧之间<b>计算运动矢量并生成中间帧</b>，不是简单复制帧，所以慢动作和运镜会明显顺滑。" },
+    { key: "fps", label: "目标帧率", type: "select", default: "60",
+      options: ["30", "48", "60", "90", "120"],
+      help: "输出帧率。24→60 观感提升最明显；<b>超过 60 帧收益递减且体积暴涨</b>，除非要做慢动作升格。" },
+    { key: "mode", label: "插帧模式", type: "radio", default: "mci",
+      options: [
+        { value: "blend", label: "快速混合（快）" },
+        { value: "mci", label: "运动补偿（标准）" },
+        { value: "mci_hq", label: "运动补偿 + 场景检测（最佳）" }
+      ],
+      help: "<b>混合</b>只是把前后帧加权叠一起，速度快但快速运动会有重影；<b>运动补偿</b>会追踪物体轨迹生成真实中间帧，效果好但慢得多；<b>+场景检测</b>可避免镜头切换处生成鬼影。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "补帧结果的保存路径。<b>补帧非常吃 CPU</b>，1080p 一分钟素材可能需要几分钟到十几分钟。" }
+  ],
+  build(v) {
+    let f = `minterpolate=fps=${v.fps}`;
+    if (v.mode === "blend") f += ":mi_mode=blend";
+    else if (v.mode === "mci") f += ":mi_mode=mci:mc_mode=obmc:me_mode=bidir:vsbmc=0";
+    else f += ":mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1:scd=fdiff";
+    return { argv: ["-i", v.input, "-vf", f,
+      "-c:v", "libx264", "-crf", "20", "-preset", "medium", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "motionblur", group: "特效与修复", icon: "💫", name: "动态模糊",
+  desc: "帧混合制造运动拖影，或让画面更柔和",
+  tag: "_blur", outExt: "mp4",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "合成「运动模糊」的常用场景：给动画/游戏录屏加真实感、给 PPT 转场做柔和过渡、做残影特效。" },
+    { key: "mode", label: "模糊方式", type: "radio", default: "blur",
+      options: [
+        { value: "blur", label: "三角权重（柔和）" },
+        { value: "trail", label: "等权叠加（残影拖尾）" }
+      ],
+      help: "<b>三角权重</b>让最新的帧权重最高、越旧越淡，接近真实相机长曝光的拖影；<b>等权叠加</b>每帧权重相同，会出现明显的多重残影（适合赛博/故障风）。" },
+    { key: "frames", label: "混合帧数", type: "range", default: 5, min: 2, max: 20,
+      help: "同时参与混合的帧数，<b>等价于「快门时间」</b>。3-5 是自然动态模糊，8 以上开始明显拖尾，20 帧几乎完全糊成一片。" },
+    { key: "crf", label: "画质 (CRF)", type: "range", default: 20, min: 15, max: 30, advanced: true,
+      help: "帧混合会引入大量细碎纹理，压缩效率变低，建议 CRF 不超过 22。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "处理结果的保存路径。" }
+  ],
+  build(v) {
+    const n = Number(v.frames);
+    let f;
+    if (v.mode === "trail") {
+      f = `tmix=frames=${n}`;
+    } else {
+      const w = [];
+      for (let i = 0; i < n; i++) w.push(String(1 + Math.min(i, n - 1 - i)));
+      f = `tmix=frames=${n}:weights='${w.join(" ")}'`;
+    }
+    return { argv: ["-i", v.input, "-vf", f,
+      "-c:v", "libx264", "-crf", String(v.crf), "-preset", "medium", "-c:a", "copy", v.output] };
+  }
+},
+
+/* ==================== 专业编码与流媒体 ==================== */
+{
+  id: "av1", group: "专业编码与流媒体", icon: "🅰️", name: "AV1 编码",
+  desc: "下一代开源编码，同画质比 H.265 再省 30% 体积",
+  tag: "_av1", outExt: "mkv", extMap: ["container", { mkv: "mkv", mp4: "mp4", webm: "webm" }],
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要转成 AV1 的视频。AV1 免专利、压缩率最高，<b>缺点是编码慢且部分老设备/播放器不支持</b>（B 站、YouTube 已全面支持）。" },
+    { key: "encoder", label: "编码器", type: "radio", default: "libsvtav1",
+      options: [
+        { value: "libsvtav1", label: "SVT-AV1（推荐）" },
+        { value: "libaom-av1", label: "libaom（参考实现）" },
+        { value: "librav1e", label: "rav1e（Rust）" }
+      ],
+      help: "<b>SVT-AV1</b> 是 Intel/Netflix 联合开发，速度是 libaom 的数十倍，质量接近，日常首选；<b>libaom</b> 是 AOMedia 官方实现，最慢但极限压缩略好；<b>rav1e</b> 是 Rust 实现，速度居中、内存占用低。" },
+    { key: "speed", label: "速度档位", type: "select", default: "2",
+      options: [
+        { value: "0", label: "极速（画质最低）" },
+        { value: "1", label: "快速" },
+        { value: "2", label: "均衡（推荐）" },
+        { value: "3", label: "慢速" },
+        { value: "4", label: "极致（数倍耗时）" }
+      ],
+      help: "编码速度与压缩率的权衡。<b>AV1 的档位差距极其夸张</b>：从极速到极致，同一素材耗时可能相差 10 倍以上，体积只小 10-20%。先用「均衡」试水。" },
+    { key: "crf", label: "质量 (CRF)", type: "range", default: 32, min: 0, max: 63,
+      help: "AV1 的 CRF 范围是 <b>0-63</b>（比 x264 的 0-51 宽）。<b>数值越小画质越高</b>：28 接近视觉无损，32 是默认平衡点，40 以上明显糊。" },
+    { key: "container", label: "容器格式", type: "radio", default: "mkv",
+      options: [
+        { value: "mkv", label: "MKV（兼容最好）" },
+        { value: "mp4", label: "MP4" },
+        { value: "webm", label: "WebM（网页）" }
+      ],
+      help: "AV1 在三种容器里都能放。<b>MKV</b> 容错性最好、支持多音轨字幕；<b>MP4</b> 适合苹果/移动端；<b>WebM</b> 是网页 <video> 标签的原生格式。" },
+    { key: "tenbit", label: "10-bit 色深", type: "switch", default: false, advanced: true,
+      help: "10-bit 能显著减少渐变场景的色带，<b>但兼容性会下降</b>（部分老播放器黑屏），且编码更慢。普通视频保持关闭即可。" },
+    { key: "acodec", label: "音频编码", type: "radio", default: "copy",
+      options: [
+        { value: "copy", label: "copy（保留原音频）" },
+        { value: "libopus", label: "Opus" },
+        { value: "aac", label: "AAC" }
+      ],
+      help: "AV1 视频配 <b>Opus</b> 是 WebM/流媒体的标准组合；MP4 容器建议 AAC 或直接 copy。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "AV1 文件的保存路径，扩展名会随容器自动切换。" }
+  ],
+  build(v) {
+    const idx = Number(v.speed) || 0;
+    const a = ["-i", v.input, "-c:v", v.encoder];
+    if (v.encoder === "libsvtav1") {
+      a.push("-preset", String([13, 11, 8, 6, 4][idx]));
+    } else if (v.encoder === "libaom-av1") {
+      a.push("-cpu-used", String([8, 6, 4, 2, 0][idx]), "-row-mt", "1", "-b:v", "0");
+    } else {
+      a.push("-speed", String([10, 8, 6, 4, 2][idx]));
+    }
+    a.push("-crf", String(v.crf));
+    if (v.tenbit) a.push("-pix_fmt", "yuv420p10le");
+    if (v.acodec === "copy") a.push("-c:a", "copy");
+    else if (v.acodec === "libopus") a.push("-c:a", "libopus", "-b:a", "128k");
+    else a.push("-c:a", "aac", "-b:a", "160k");
+    a.push(v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "prores", group: "专业编码与流媒体", icon: "🎬", name: "ProRes 编码",
+  desc: "剪辑软件友好的中间格式，Premiere/达芬奇直接拖",
+  tag: "_prores", outExt: "mov",
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要转成 ProRes 的视频。ProRes 是苹果的<b>帧内压缩</b>编码，每一帧独立解码，所以剪辑软件拖时间线几乎不卡——代价是体积很大（约为原片的 5-20 倍）。" },
+    { key: "profile", label: "ProRes 档次", type: "select", default: "3",
+      options: [
+        { value: "0", label: "Proxy（代理，体积最小）" },
+        { value: "1", label: "LT（轻量）" },
+        { value: "2", label: "Standard（标准）" },
+        { value: "3", label: "HQ（高质量，推荐）" },
+        { value: "4", label: "4444（带 Alpha 透明）" },
+        { value: "5", label: "4444 XQ（最高质量）" }
+      ],
+      help: "<b>HQ</b> 是影视交付的默认档，画质与体积平衡最好；<b>Proxy</b> 适合低配电脑剪辑时当代理素材；<b>4444</b> 带 Alpha 通道，用于需要透明的合成输出。" },
+    { key: "audio", label: "音频编码", type: "radio", default: "pcm",
+      options: [
+        { value: "pcm", label: "PCM 16bit（剪辑标准）" },
+        { value: "copy", label: "copy（保留原音频）" },
+        { value: "none", label: "不要音频" }
+      ],
+      help: "剪辑流程统一用 <b>PCM 无损</b>，避免二次压缩；仅做转封装时可选 copy。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "ProRes 文件的保存路径，固定为 .mov 容器。<b>注意预留磁盘空间</b>：1080p HQ 约 220 Mbps，10 分钟就近 16 GB。" }
+  ],
+  build(v) {
+    const p = String(v.profile);
+    const alpha = (p === "4" || p === "5");
+    const a = ["-i", v.input, "-c:v", "prores_ks", "-profile:v", p,
+      "-pix_fmt", alpha ? "yuva444p10le" : "yuv422p10le", "-vendor", "apl0"];
+    if (v.audio === "pcm") a.push("-c:a", "pcm_s16le");
+    else if (v.audio === "none") a.push("-an");
+    else a.push("-c:a", "copy");
+    a.push(v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "streaming", group: "专业编码与流媒体", icon: "📡", name: "HLS / DASH 切片",
+  desc: "生成流媒体播放列表与分片，可挂到 Web 服务器点播",
+  tag: "_stream", outExt: "m3u8", extMap: ["mode", { hls: "m3u8", dash: "mpd" }],
+  params: [
+    { key: "input", label: "输入文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要切片成流媒体的视频。切片后由<b>一个播放列表文件</b>（.m3u8 / .mpd）+ <b>一堆小分片</b>（.ts / .m4s）组成，播放器按需加载分片，实现边下边播和清晰度切换。" },
+    { key: "mode", label: "协议", type: "radio", default: "hls",
+      options: [
+        { value: "hls", label: "HLS（苹果 / 通用）" },
+        { value: "dash", label: "DASH（MPEG 标准）" }
+      ],
+      help: "<b>HLS</b> 兼容性最好（iOS、Safari、智能电视、VLC 全支持），用 .ts 分片；<b>DASH</b> 是开放标准，用 .m4s 分片、码率切换更灵活，但要浏览器支持 MSE。" },
+    { key: "segTime", label: "分片时长 (秒)", type: "number", default: 6,
+      help: "每个分片多长。<b>HLS 官方建议 6 秒</b>（苹果要求 ≤10）；切片越短首屏越快、请求越多，直播场景常用 2-4 秒。" },
+    { key: "encode", label: "编码方式", type: "radio", default: "reencode",
+      options: [
+        { value: "reencode", label: "重新编码 H.264（通用）" },
+        { value: "copy", label: "直接复制（快，需源为 H.264）" }
+      ],
+      help: "<b>重新编码</b>兼容所有源，且能强制关键帧对齐分片边界；<b>直接复制</b>秒完成，但要求源视频本来就是 H.264+AAC，否则播放器可能报错。" },
+    { key: "crf", label: "画质 (CRF)", type: "range", default: 20, min: 15, max: 30, advanced: true,
+      help: "仅重新编码时生效。流媒体建议 20-23，兼顾画质与码率。" },
+    { key: "output", label: "播放列表文件", type: "savefile", required: true, flag: "输出",
+      help: "生成的 <b>.m3u8 / .mpd 播放列表</b>路径。分片会自动输出到<b>同目录</b>，文件名以它为前缀（如 视频_stream_seg_000.ts）。" }
+  ],
+  build(v) {
+    const a = ["-i", v.input];
+    if (v.encode === "copy") {
+      a.push("-c", "copy");
+    } else {
+      a.push("-c:v", "libx264", "-crf", String(v.crf), "-preset", "veryfast",
+             "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+             "-c:a", "aac", "-b:a", "128k");
+    }
+    const dir = dirname(v.output);
+    const base = stem(v.output);
+    if (v.mode === "hls") {
+      a.push("-f", "hls", "-hls_time", String(v.segTime), "-hls_playlist_type", "vod",
+             "-hls_segment_filename", `${dir}/${base}_seg_%03d.ts`, v.output);
+    } else {
+      a.push("-f", "dash", "-seg_duration", String(v.segTime),
+             "-use_template", "1", "-use_timeline", "1",
+             "-init_seg_name", `${base}_init_$RepresentationID$.m4s`,
+             "-media_seg_name", `${base}_$RepresentationID$_$Number$.m4s`,
+             v.output);
+    }
+    return { argv: a };
+  }
 }
 ];
 
@@ -953,6 +1336,33 @@ function stem(p) {
   const base = p.split(/[\\/]/).pop() || "output";
   const i = base.lastIndexOf(".");
   return i > 0 ? base.slice(0, i) : base;
+}
+
+function dirname(p) {
+  const s = String(p).replace(/\\/g, "/");
+  const i = s.lastIndexOf("/");
+  return i > 0 ? s.slice(0, i) : ".";
+}
+
+/** 滤镜字符串内的 Windows 路径：D:\a\b.cube → D\:/a/b.cube（外层需再加单引号） */
+function fpath(p) {
+  return String(p).trim().replace(/^"|"$/g, "").replace(/\\/g, "/").replace(/:/g, "\\:");
+}
+
+/** 把 build() 的返回值统一成步骤数组，兼容单条命令与多遍处理 */
+function normalizeSteps(r) {
+  if (!r || r.error) return [];
+  if (Array.isArray(r.steps)) return r.steps.filter(s => s && Array.isArray(s.argv) && s.argv.length);
+  if (Array.isArray(r.argv) && r.argv.length) return [{ argv: r.argv }];
+  return [];
+}
+
+/** 生成的输出扩展名（跟随容器等联动） */
+function extFor(f, v) {
+  if (!f.extMap) return null;
+  const [key, map] = f.extMap;
+  const val = typeof v === "object" ? v[key] : v;
+  return map[val] || null;
 }
 
 function genOutput(feature, inputPath, extOverride) {
@@ -976,7 +1386,7 @@ function highlightCmd(text) {
 }
 
 /* ---------------- 导航渲染 ---------------- */
-const GROUP_ORDER = ["视频处理", "音频处理", "字幕与叠加", "图像与 GIF", "组合工具"];
+const GROUP_ORDER = ["视频处理", "音频处理", "特效与修复", "字幕与叠加", "图像与 GIF", "专业编码与流媒体", "组合工具"];
 
 function renderNav(filter = "") {
   const nav = $("#feature-nav");
@@ -1242,22 +1652,32 @@ function autoFillOutput(f) {
   outEl.value = genOutput(f, inputPath, ext);
 }
 
-function onParamChange() {
+function onParamChange(ev) {
   if (!currentFeature) return;
-  // 输入变化时若输出未手动改过则跟随刷新
   const f = currentFeature;
+  // 输出框自身的变化：立刻标记为「用户已手动指定」，避免被自动命名覆盖
+  if (ev && ev.target && ev.target.hasAttribute && ev.target.hasAttribute("data-output")) {
+    outputDirty[f.id] = !!ev.target.value;
+    updatePreview();
+    return;
+  }
+  // 输入变化时若输出未手动改过则跟随刷新
   if (f.outExt && !outputDirty[f.id]) autoFillOutput(f);
   updatePreview();
 }
 
 /* ---------------- 命令预览 ---------------- */
-let previewArgv = null;
+let previewSteps = [];
 let previewError = null;
+
+function cmdLine(argv) {
+  return ["ffmpeg", "-hide_banner", "-y", ...argv].map(q).join(" ");
+}
 
 function updatePreview() {
   const f = currentFeature;
   const box = $("#command-preview");
-  previewArgv = null; previewError = null;
+  previewSteps = []; previewError = null;
   if (!f) { box.innerHTML = '<span class="cmd-empty">请先选择功能…</span>'; return; }
 
   const v = collectValues(f);
@@ -1267,12 +1687,22 @@ function updatePreview() {
     return;
   }
   const r = f.build(v);
-  if (r.error) { previewError = r.error; box.innerHTML = `<span class="cmd-empty">⚠ ${esc(r.error)}</span>`; return; }
-  if (!r.argv.length) { box.innerHTML = '<span class="cmd-empty">ffprobe -v quiet -print_format json -show_format -show_streams &lt;输入文件&gt;</span>'; previewArgv = []; return; }
+  if (r && r.error) { previewError = r.error; box.innerHTML = `<span class="cmd-empty">⚠ ${esc(r.error)}</span>`; return; }
 
-  previewArgv = r.argv;
-  const display = ["ffmpeg", "-hide_banner", "-y", ...r.argv].map(q).join(" ");
-  box.innerHTML = highlightCmd(display);
+  const steps = normalizeSteps(r);
+  if (!steps.length) {
+    // 探测功能没有 ffmpeg 命令
+    box.innerHTML = '<span class="cmd-empty">ffprobe -v quiet -print_format json -show_format -show_streams &lt;输入文件&gt;</span>';
+    return;
+  }
+  previewSteps = steps;
+  box.classList.toggle("multi", steps.length > 1);
+  box.innerHTML = steps.map((s, i) => {
+    const head = steps.length > 1
+      ? `<span class="cmd-step">步骤 ${i + 1}/${steps.length}${s.note ? " · " + esc(s.note) : ""}</span>\n`
+      : "";
+    return head + highlightCmd(cmdLine(s.argv));
+  }).join("\n\n");
 }
 
 function autoFillable(f) {
@@ -1290,6 +1720,8 @@ function selectFeature(id) {
   $("#feature-desc").textContent = f.desc;
   renderNav($("#feature-search").value.trim());
   renderParams(f);
+  // 批量抽屉开着时，同步「当前功能」提示
+  if (!$("#batch-drawer").classList.contains("hidden")) syncBatchFeature();
 }
 
 /* ---------------- 日志 ---------------- */
@@ -1331,11 +1763,84 @@ function setStatus(text, cls) {
 }
 
 /* ---------------- 执行 ---------------- */
+let running = false;
+
+function openLog() {
+  $("#log-console").classList.remove("hidden");
+  $("#log-toggle-arrow").textContent = "▾";
+}
+
+function setRunningUI(on, batch = false) {
+  running = on;
+  $("#btn-run").classList.toggle("hidden", on);
+  $("#btn-stop").classList.toggle("hidden", !on);
+  if (batch) {
+    $("#btn-batch-run").classList.toggle("hidden", on);
+    $("#btn-batch-stop").classList.toggle("hidden", !on);
+  }
+  $("#btn-batch").disabled = on;
+  $("#btn-batch-add").disabled = on;
+  $("#btn-batch-clear").disabled = on;
+  if (!on) syncBatchFeature();
+}
+
+/** 执行一条 ffmpeg 命令，resolve 退出码 */
+function runStep(argv, cwd) {
+  return new Promise(async resolve => {
+    log("$ " + cmdLine(argv), "#7cc7ff");
+    let r;
+    try {
+      r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ argv, display: cmdLine(argv), cwd: cwd || "" }) }).then(x => x.json());
+    } catch (e) {
+      log("启动失败: " + e, "#ef4b5f"); resolve(-1); return;
+    }
+    if (!r.ok) { log("启动失败: " + r.error, "#ef4b5f"); resolve(-1); return; }
+
+    currentTaskId = r.id;
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource(`/api/stream/${r.id}`);
+    eventSource.onmessage = ev => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "log") {
+        // 进度行原地刷新，避免日志被上万行进度冲爆
+        const body = $("#log-body");
+        if (/^frame=|^size=/.test(msg.line)) {
+          const lines = body.textContent.split("\n");
+          if (/^frame=|^size=/.test(lines[lines.length - 2] || "")) lines.splice(lines.length - 2, 1);
+          body.textContent = lines.join("\n");
+        }
+        log(msg.line);
+      } else if (msg.type === "exit") {
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        currentTaskId = null;
+        resolve(msg.code);
+      }
+    };
+    eventSource.onerror = () => {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      if (currentTaskId) { currentTaskId = null; resolve(-1); }
+    };
+  });
+}
+
+/** 顺序执行多遍处理，返回最后一个非零退出码（或 0） */
+async function executeSteps(steps, cwd) {
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (steps.length > 1) {
+      log(`\n——— 步骤 ${i + 1}/${steps.length}${s.note ? " · " + s.note : ""} ———`, "#8a99ad");
+    }
+    const code = await runStep(s.argv, cwd);
+    if (code !== 0) return code;
+  }
+  return 0;
+}
+
 async function runCurrent() {
   const f = currentFeature;
   if (!f) return;
-  $("#log-console").classList.remove("hidden");
-  $("#log-toggle-arrow").textContent = "▾";
+  openLog();
   $("#log-body").textContent = "";
 
   // 探测功能走 ffprobe
@@ -1364,70 +1869,37 @@ async function runCurrent() {
     return;
   }
 
-  if (!previewArgv || previewError) { log(previewError || "请先补全必填参数", "#ef4b5f"); return; }
+  if (previewError || !previewSteps.length) {
+    log(previewError || "请先补全必填参数", "#ef4b5f");
+    return;
+  }
 
   const v = collectValues(f);
-  let argv = previewArgv;
+  const steps = previewSteps.map(s => ({ ...s, argv: s.argv.slice() }));
 
-  // concat copy 模式：先生成列表文件
+  // concat copy 模式：先生成列表文件，替换所有步骤里的占位符
   if (f.needsConcatList && f.needsConcatList(v)) {
     const files = (v.files || "").split("\n").map(s => s.trim()).filter(Boolean);
     const r = await fetch("/api/concat-list", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ files }) }).then(r => r.json());
     if (!r.ok) { log("生成合并列表失败: " + r.error, "#ef4b5f"); return; }
-    argv = argv.map(a => a === "{LIST}" ? r.path : a);
+    steps.forEach(s => { s.argv = s.argv.map(a => a === "{LIST}" ? r.path : a); });
     log(`已生成合并列表: ${r.path}（${r.count} 个文件）`, "#8a99ad");
   }
 
-  const display = ["ffmpeg", "-hide_banner", "-y", ...argv].map(q).join(" ");
-  log("$ " + display, "#7cc7ff");
-
-  const r = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ argv, display }) }).then(r => r.json());
-  if (!r.ok) { log("启动失败: " + r.error, "#ef4b5f"); return; }
-
-  currentTaskId = r.id;
-  $("#btn-run").classList.add("hidden");
-  $("#btn-stop").classList.remove("hidden");
+  setRunningUI(true);
   setStatus("⏳ 执行中…", "running");
+  const code = await executeSteps(steps, v.output ? dirname(v.output) : "");
+  setRunningUI(false);
 
-  if (eventSource) eventSource.close();
-  eventSource = new EventSource(`/api/stream/${r.id}`);
-  eventSource.onmessage = ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.type === "log") {
-      // 进度行刷新显示
-      const body = $("#log-body");
-      if (/^frame=|^size=/.test(msg.line)) {
-        const lines = body.textContent.split("\n");
-        if (/^frame=|^size=/.test(lines[lines.length - 2] || "")) lines.splice(lines.length - 2, 1);
-        body.textContent = lines.join("\n");
-      }
-      log(msg.line);
-    } else if (msg.type === "exit") {
-      eventSource.close(); eventSource = null;
-      currentTaskId = null;
-      $("#btn-run").classList.remove("hidden");
-      $("#btn-stop").classList.add("hidden");
-      if (msg.code === 0) {
-        setStatus("✅ 执行成功", "success");
-        log("\n✅ 任务完成！", "#22b07d");
-        if (v.output) log(`📁 输出文件: ${v.output}`, "#22b07d");
-      } else {
-        setStatus(`❌ 执行失败 (退出码 ${msg.code})`, "error");
-        log(`\n❌ FFmpeg 退出码: ${msg.code}，请检查上方红色错误信息`, "#ef4b5f");
-      }
-    }
-  };
-  eventSource.onerror = () => {
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    if (currentTaskId) {
-      setStatus("连接中断", "error");
-      $("#btn-run").classList.remove("hidden");
-      $("#btn-stop").classList.add("hidden");
-      currentTaskId = null;
-    }
-  };
+  if (code === 0) {
+    setStatus("✅ 执行成功", "success");
+    log("\n✅ 任务完成！", "#22b07d");
+    if (v.output) log(`📁 输出文件: ${v.output}`, "#22b07d");
+  } else {
+    setStatus(`❌ 执行失败 (退出码 ${code})`, "error");
+    log(`\n❌ FFmpeg 退出码: ${code}，请检查上方红色错误信息`, "#ef4b5f");
+  }
 }
 
 async function stopCurrent() {
@@ -1435,6 +1907,137 @@ async function stopCurrent() {
   await fetch("/api/stop", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: currentTaskId }) });
   log("\n⏹ 用户手动停止任务", "#f5a623");
+}
+
+/* ---------------- 批量队列 ---------------- */
+const batchItems = [];      // {path, status: wait|run|ok|fail, out}
+let batchStopFlag = false;
+
+function batchableFeature(f) {
+  return !!(f && !f.isProbe && f.params.some(p => p.type === "file"));
+}
+
+function batchName(p) {
+  return String(p).split(/[\\/]/).pop();
+}
+
+function renderBatchList() {
+  $("#batch-count").textContent = `${batchItems.length} 个文件`;
+  const badge = $("#batch-badge");
+  badge.textContent = batchItems.length;
+  badge.classList.toggle("hidden", !batchItems.length);
+
+  const list = $("#batch-list");
+  if (!batchItems.length) {
+    list.innerHTML = '<div class="empty-tip">队列为空<br><span style="font-size:12px;color:#8a99ad">点「＋ 添加文件」一次把多个素材加进来</span></div>';
+    return;
+  }
+  const LBL = { wait: "待处理", run: "运行中…", ok: "✓ 成功", fail: "✕ 失败" };
+  list.innerHTML = batchItems.map((it, i) => `
+    <div class="batch-item ${it.status}">
+      <div class="batch-item-top">
+        <span class="batch-idx">${i + 1}</span>
+        <span class="batch-file" title="${esc(it.path)}">${esc(batchName(it.path))}</span>
+        <span class="batch-status">${LBL[it.status]}</span>
+      </div>
+      <div class="batch-item-path">${esc(it.path)}</div>
+      ${it.out ? `<div class="batch-item-out">→ ${esc(it.out)}</div>` : ""}
+    </div>`).join("");
+}
+
+function syncBatchFeature() {
+  const f = currentFeature;
+  $("#batch-feature-name").textContent = f ? f.name : "—";
+  const hint = $("#batch-hint");
+  if (!batchableFeature(f)) {
+    hint.innerHTML = '⚠ 当前功能没有单个输入文件，<b>无法批量处理</b>。请切到「格式转换」「视频压缩」「LUT 调色」等带输入文件的功能。';
+    $("#btn-batch-add").disabled = true;
+    $("#btn-batch-run").disabled = true;
+  } else {
+    hint.innerHTML = '队列中每个文件都会套用<b>当前页面上设置的参数</b>，输出自动命名为 <code>原文件名 + 后缀</code> 存到 outputs 目录。批量执行中可随时停止。';
+    $("#btn-batch-add").disabled = false;
+    $("#btn-batch-run").disabled = false;
+  }
+}
+
+async function addBatchFiles() {
+  const f = currentFeature;
+  if (!batchableFeature(f)) { alert("当前功能不支持批量处理，请选择带输入文件的功能。"); return; }
+  const p = f.params.find(x => x.type === "file");
+  const r = await browseDialog({ mode: "open", multi: true, filter: p.filter || "" });
+  if (!r || !r.paths) return;
+  let added = 0;
+  r.paths.forEach(path => {
+    if (!batchItems.some(x => x.path === path)) { batchItems.push({ path, status: "wait", out: "" }); added++; }
+  });
+  renderBatchList();
+  if (!added && r.paths.length) alert("这些文件已经在队列中了。");
+}
+
+async function runBatch() {
+  const f = currentFeature;
+  if (!batchableFeature(f)) { alert("当前功能不支持批量处理。"); return; }
+  if (!batchItems.length) { alert("队列为空，请先添加文件。"); return; }
+  if (previewError || !previewSteps.length) { alert("当前参数还不完整，请先在主界面补全必填项。"); return; }
+
+  const baseVals = collectValues(f);
+  const fileKey = f.params.find(x => x.type === "file").key;
+  const outParam = f.params.find(x => x.type === "savefile");
+
+  batchItems.forEach(it => { it.status = "wait"; it.out = ""; });
+  batchStopFlag = false;
+  renderBatchList();
+  setRunningUI(true, true);
+  openLog();
+  log(`📚 批量队列开始：共 ${batchItems.length} 个文件 · 功能「${f.name}」`, "#7cc7ff");
+
+  let okCount = 0, failCount = 0;
+  for (let i = 0; i < batchItems.length; i++) {
+    const it = batchItems[i];
+    if (batchStopFlag) continue;
+    const v = { ...baseVals, [fileKey]: it.path };
+    if (outParam) v[outParam.key] = genOutput(f, it.path, extFor(f, v));
+    it.out = outParam ? v[outParam.key] : "";
+    it.status = "run";
+    renderBatchList();
+
+    log(`\n━━━ [${i + 1}/${batchItems.length}] ${batchName(it.path)} ━━━`, "#8a99ad");
+    if (it.out) log(`📁 输出: ${it.out}`, "#8a99ad");
+
+    const steps = normalizeSteps(f.build(v));
+    if (!steps.length) {
+      it.status = "fail"; failCount++; renderBatchList();
+      log("❌ 参数构建失败，已跳过", "#ef4b5f");
+      continue;
+    }
+    const code = await executeSteps(steps, it.out ? dirname(it.out) : "");
+    if (code === 0) { it.status = "ok"; okCount++; }
+    else { it.status = "fail"; failCount++; log(`❌ 该文件失败（退出码 ${code}），继续下一个`, "#ef4b5f"); }
+    renderBatchList();
+  }
+
+  setRunningUI(false, true);
+  const msg = `批量完成：成功 ${okCount} 个，失败 ${failCount} 个` + (batchStopFlag ? "（已手动停止）" : "");
+  setStatus(msg, failCount ? "error" : "success");
+  log("\n" + (failCount ? "⚠ " : "✅ ") + msg, failCount ? "#f5a623" : "#22b07d");
+}
+
+function stopBatch() {
+  batchStopFlag = true;
+  log("\n⏹ 正在停止批量队列…", "#f5a623");
+  stopCurrent();
+}
+
+/* ---------------- 批量抽屉 ---------------- */
+function openBatch() {
+  syncBatchFeature();
+  renderBatchList();
+  $("#batch-mask").classList.remove("hidden");
+  $("#batch-drawer").classList.remove("hidden");
+}
+function closeBatch() {
+  $("#batch-mask").classList.add("hidden");
+  $("#batch-drawer").classList.add("hidden");
 }
 
 /* ---------------- 输出目录抽屉 ---------------- */
@@ -1486,4 +2089,19 @@ async function showOutputs() {
     $("#outputs-drawer").classList.add("hidden");
   };
   $("#drawer-mask").onclick = $("#btn-close-drawer").onclick;
+
+  // 批量队列
+  $("#btn-batch").onclick = openBatch;
+  $("#btn-close-batch").onclick = closeBatch;
+  $("#batch-mask").onclick = closeBatch;
+  $("#btn-batch-add").onclick = addBatchFiles;
+  $("#btn-batch-run").onclick = runBatch;
+  $("#btn-batch-stop").onclick = stopBatch;
+  $("#btn-batch-clear").onclick = () => {
+    if (!batchItems.length) return;
+    if (!confirm("确定清空队列中的 " + batchItems.length + " 个文件吗？（不会删除源文件）")) return;
+    batchItems.length = 0;
+    renderBatchList();
+  };
+  renderBatchList();
 })();

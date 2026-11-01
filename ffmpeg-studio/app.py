@@ -25,11 +25,11 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# FFMPEG_BIN = r"D:\Program Files\ffmpeg-9.0-full_build\bin\ffmpeg.exe"
-# FFPROBE_BIN = r"D:\Program Files\ffmpeg-9.0-full_build\bin\ffprobe.exe"
+# FFMPEG_BIN = r""
+# FFPROBE_BIN = r""
 
-FFMPEG_BIN = r""
-FFPROBE_BIN = r""
+FFMPEG_BIN = r"D:\Program Files\ffmpeg-9.0-full_build\bin\ffmpeg.exe"
+FFPROBE_BIN = r"D:\Program Files\ffmpeg-9.0-full_build\bin\ffprobe.exe"
 if not os.path.exists(FFMPEG_BIN):
     FFMPEG_BIN = "ffmpeg"
 if not os.path.exists(FFPROBE_BIN):
@@ -161,7 +161,7 @@ def _reader_thread(task_id, proc, q):
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    """执行命令。body: {argv: [...], display: '完整命令字符串'}"""
+    """执行命令。body: {argv: [...], display: '完整命令字符串', cwd: '可选工作目录'}"""
     body = request.json or {}
     argv = body.get("argv", [])
     if not argv or not isinstance(argv, list):
@@ -169,11 +169,17 @@ def api_run():
     argv = [str(a) for a in argv]
     full_cmd = [FFMPEG_BIN, "-hide_banner", "-y"] + argv
 
+    # 工作目录：DASH 等封装器会把分片写到进程 cwd，指到输出目录才不会散落
+    cwd = (body.get("cwd") or "").strip()
+    if cwd and not os.path.isdir(cwd):
+        cwd = None
+
     task_id = uuid.uuid4().hex[:12]
     q = queue.Queue()
     try:
         proc = subprocess.Popen(
             full_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cwd=cwd,
             text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
     except Exception as e:

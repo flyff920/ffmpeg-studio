@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>FFmpeg Studio - 可视化音视频工具箱</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f6ef7'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -74,6 +75,9 @@
       <div class="action-bar">
         <button class="btn btn-primary btn-lg" id="btn-run">▶ 开始执行</button>
         <button class="btn btn-danger btn-lg hidden" id="btn-stop">⏹ 停止任务</button>
+        <button class="btn btn-secondary btn-lg" id="btn-batch">
+          📚 批量队列 <span class="badge-count hidden" id="batch-badge">0</span>
+        </button>
       </div>
     </section>
   </main>
@@ -87,6 +91,34 @@
     <button class="btn btn-mini" id="btn-close-drawer">✕</button>
   </div>
   <div class="drawer-body" id="outputs-list"></div>
+</div>
+
+<!-- 批量队列抽屉 -->
+<div class="drawer-mask hidden" id="batch-mask"></div>
+<div class="drawer drawer-batch hidden" id="batch-drawer">
+  <div class="drawer-head">
+    <h3>📚 批量队列</h3>
+    <button class="btn btn-mini" id="btn-close-batch">✕</button>
+  </div>
+
+  <div class="batch-info">
+    <div class="batch-cur">当前功能：<b id="batch-feature-name">—</b></div>
+    <div class="batch-hint" id="batch-hint"></div>
+  </div>
+
+  <div class="batch-toolbar">
+    <button class="btn btn-mini" id="btn-batch-add">＋ 添加文件</button>
+    <button class="btn btn-mini" id="btn-batch-clear">清空</button>
+    <span class="spacer"></span>
+    <span class="batch-count" id="batch-count">0 个文件</span>
+  </div>
+
+  <div class="drawer-body" id="batch-list"></div>
+
+  <div class="batch-footer">
+    <button class="btn btn-primary" id="btn-batch-run">▶ 开始批量执行</button>
+    <button class="btn btn-danger hidden" id="btn-batch-stop">⏹ 停止</button>
+  </div>
 </div>
 
 <script src="/static/app.js"></script>
