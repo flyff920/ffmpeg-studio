@@ -932,7 +932,8 @@ const FEATURES = [
     { key: "duration", label: "录制时长 (秒)", type: "text", flag: "-t", placeholder: "留空则手动停止",
       help: "留空则一直录制，直到你点「停止任务」。填了时长就到点自动结束。" },
     { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
-      help: "录制文件的保存路径。<b>点「停止任务」时 FFmpeg 会先写完文件索引再退出</b>，所以停止后稍等一两秒，等日志出现「文件已正常收尾」再操作文件。" }
+      filter: "MP4 视频|*.mp4|MKV 视频（抗中断）|*.mkv|所有文件 (*.*)|*.*",
+      help: "录制文件的保存路径。<b>点「停止任务」时 FFmpeg 会先写完文件索引再退出</b>，所以停止后稍等一两秒，等日志出现「文件已正常收尾」再操作文件。如果录的是很长的内容、担心中途崩溃，可以存成 <b>.mkv</b>——它不需要写尾部索引，意外中断也不丢已录部分。" }
   ],
   build(v) {
     const a = ["-f", "gdigrab", "-framerate", v.framerate];
