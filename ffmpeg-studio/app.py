@@ -15,6 +15,9 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urljoin
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, request, send_from_directory, Response
 
@@ -97,7 +100,7 @@ def api_probe():
 def api_browse():
     """通过 PowerShell 脚本弹出 Windows 原生文件对话框（置顶显示）"""
     body = request.json or {}
-    mode = body.get("mode", "open")          # open | save
+    mode = body.get("mode", "open")          # open | save | folder
     flt = body.get("filter", "所有文件 (*.*)|*.*")
     multi = bool(body.get("multi"))
 
@@ -144,6 +147,202 @@ def api_concat_list():
         for p in files:
             fp.write("file '%s'\n" % p.replace("'", "'\\''"))
     return jsonify({"ok": True, "path": list_path, "count": len(files)})
+
+
+# ---------------- 网课 / 流媒体：分片扫描 + 播放列表解析 ----------------
+DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+SEGMENT_EXTS = [".ts", ".m4s", ".m4v", ".mp4", ".flv", ".aac", ".mp3"]
+
+
+def _natural_key(name):
+    """自然排序：001.ts / 2.ts / 10.ts 按数字大小排，而不是字典序"""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(name))]
+
+
+def _segments_in(folder):
+    """扫描分片目录，返回 (分片列表, m3u8 列表, 主扩展名)。
+    主扩展名自动判定：有 .ts 就用 .ts（网课/直播回放最常见），否则取数量最多的那种。"""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return [], [], None
+    buckets, m3u8 = {}, []
+    for n in names:
+        p = os.path.join(folder, n)
+        if not os.path.isfile(p):
+            continue
+        ext = os.path.splitext(n)[1].lower()
+        if ext == ".m3u8":
+            m3u8.append(p)
+        elif ext in SEGMENT_EXTS:
+            buckets.setdefault(ext, []).append(p)
+    m3u8.sort(key=lambda p: _natural_key(os.path.basename(p)))
+    if not buckets:
+        return [], m3u8, None
+    main_ext = ".ts" if ".ts" in buckets else max(buckets, key=lambda e: len(buckets[e]))
+    files = sorted(buckets[main_ext], key=lambda p: _natural_key(os.path.basename(p)))
+    return files, m3u8, main_ext
+
+
+@app.route("/api/scan-dir", methods=["POST"])
+def api_scan_dir():
+    """扫描文件夹里的分片，给前端一个「找到了多少个」的即时反馈"""
+    d = ((request.json or {}).get("dir") or "").strip().strip('"')
+    if not d or not os.path.isdir(d):
+        return jsonify({"ok": False, "error": "文件夹不存在：%s" % (d or "(未填写)")})
+    files, m3u8, ext = _segments_in(d)
+    total = 0
+    for p in files:
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    exts = set()
+    try:
+        for n in os.listdir(d):
+            if os.path.isfile(os.path.join(d, n)):
+                exts.add(os.path.splitext(n)[1].lower())
+    except OSError:
+        pass
+    return jsonify({"ok": True, "dir": d, "count": len(files), "total": total,
+                    "ext": ext or "",
+                    "first": os.path.basename(files[0]) if files else "",
+                    "last": os.path.basename(files[-1]) if files else "",
+                    "m3u8": m3u8[0] if m3u8 else "",
+                    "m3u8_count": len(m3u8),
+                    "found_exts": sorted(e for e in exts if e)[:8]})
+
+
+@app.route("/api/ts-list", methods=["POST"])
+def api_ts_list():
+    """把文件夹里的分片按顺序写成 concat demuxer 的列表文件"""
+    d = ((request.json or {}).get("dir") or "").strip().strip('"')
+    if not d or not os.path.isdir(d):
+        return jsonify({"ok": False, "error": "文件夹不存在：%s" % (d or "(未填写)")})
+    files, m3u8, ext = _segments_in(d)
+    if not files:
+        return jsonify({"ok": False,
+                        "error": "这个文件夹里没找到 .ts / .m4s / .mp4 之类的分片文件"})
+    fd, list_path = tempfile.mkstemp(prefix="segconcat_", suffix=".txt")
+    total = 0
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fp:
+        for p in files:
+            fp.write("file '%s'\n" % p.replace("'", "'\\''"))
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+    return jsonify({"ok": True, "path": list_path, "count": len(files), "ext": ext,
+                    "total": total, "m3u8": m3u8[0] if m3u8 else "",
+                    "first": os.path.basename(files[0]),
+                    "last": os.path.basename(files[-1])})
+
+
+def _fetch_m3u8(url, headers, ua, timeout=25):
+    """读取播放列表文本，返回 (文本, 最终 URL)。支持 http(s) 与本地文件。"""
+    if re.match(r"^https?://", url, re.I):
+        h = {"User-Agent": ua or DEFAULT_UA, "Accept": "*/*"}
+        for line in re.split(r"[\r\n]+", headers or ""):
+            if ":" in line:
+                k, v = line.split(":", 1)
+                if k.strip():
+                    h[k.strip()] = v.strip()
+        try:
+            with urlopen(Request(url, headers=h), timeout=timeout) as r:
+                return r.read().decode("utf-8", "replace"), r.geturl()
+        except HTTPError as e:
+            hint = {401: "需要登录（试试填 Cookie）", 403: "被防盗链拦了（试试填 Referer）",
+                    404: "地址不存在（可能已过期）", 410: "地址已失效",
+                    502: "网关异常（若开着系统代理，可尝试关掉或加直连例外）",
+                    503: "服务暂不可用，稍后再试"}.get(
+                        e.code, "服务器拒绝访问")
+            raise RuntimeError("HTTP %s —— %s" % (e.code, hint))
+        except URLError as e:
+            raise RuntimeError("连不上服务器（%s），检查网络或是否需要代理" % e.reason)
+    p = url
+    if p.lower().startswith("file:///"):
+        p = unquote(p[8:])
+    elif p.lower().startswith("file://"):
+        p = unquote(p[7:])
+    with open(p, "r", encoding="utf-8", errors="replace") as f:
+        return f.read(), url
+
+
+def _resolve_playlist_url(base_url, orig_url, rel):
+    if re.match(r"^https?://", rel, re.I):
+        return rel
+    if re.match(r"^https?://", base_url or "", re.I):
+        return urljoin(base_url, rel)
+    folder = os.path.dirname(orig_url)
+    return os.path.normpath(os.path.join(folder, rel.replace("/", os.sep)))
+
+
+def _parse_variants(text, base_url, orig_url):
+    """解析 master 播放列表里的多码率变体（#EXT-X-STREAM-INF）"""
+    lines = [l.strip() for l in text.splitlines()]
+    variants = []
+    for i, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        bw = re.search(r"BANDWIDTH=(\d+)", line)
+        res = re.search(r"RESOLUTION=([0-9]+x[0-9]+)", line)
+        nxt = ""
+        for j in range(i + 1, min(i + 5, len(lines))):
+            if lines[j] and not lines[j].startswith("#"):
+                nxt = lines[j]
+                break
+        if not nxt:
+            continue
+        mbps = ("%.1f Mbps" % (int(bw.group(1)) / 1e6)) if bw else "未知码率"
+        variants.append({
+            "bandwidth": int(bw.group(1)) if bw else 0,
+            "resolution": res.group(1) if res else "",
+            "label": "%s · %s" % (res.group(1) if res else "未知分辨率", mbps),
+            "url": _resolve_playlist_url(base_url, orig_url, nxt),
+        })
+    return variants
+
+
+@app.route("/api/m3u8-resolve", methods=["POST"])
+def api_m3u8_resolve():
+    """读取 m3u8：判断是 master 还是分片列表，可按需选出最高码率的子列表"""
+    body = request.json or {}
+    url = (body.get("url") or "").strip().strip('"')
+    headers = body.get("headers") or ""
+    ua = (body.get("ua") or "").strip()
+    quality = body.get("quality") or "auto"
+    if not url:
+        return jsonify({"ok": False, "error": "请填写播放列表地址"})
+    try:
+        text, final_url = _fetch_m3u8(url, headers, ua)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "读取播放列表失败：%s" % e})
+    if "#EXTM3U" not in text[:200]:
+        return jsonify({"ok": False, "error": "返回的内容不是 m3u8 播放列表（可能需要 Referer / Cookie，或链接已失效）"})
+
+    variants = _parse_variants(text, final_url, url)
+    encrypted = ""
+    m = re.search(r"#EXT-X-(?:SESSION-)?KEY:.*?METHOD=([A-Za-z0-9-]+)", text)
+    if m and m.group(1).upper() != "NONE":
+        encrypted = m.group(1).upper()
+    segs = len(re.findall(r"^#EXTINF:", text, re.M))
+    duration = 0.0
+    for x in re.findall(r"^#EXTINF:([0-9.]+)", text, re.M):
+        try:
+            duration += float(x)
+        except ValueError:
+            pass
+
+    chosen = None
+    if variants:
+        chosen = max(variants, key=lambda v: v["bandwidth"]) if quality == "highest" else variants[0]
+    return jsonify({"ok": True, "is_master": bool(variants),
+                    "variant_count": len(variants), "variants": variants[:10],
+                    "selected": chosen,
+                    "url": (chosen or {}).get("url", final_url),
+                    "encrypted": encrypted, "segments": segs,
+                    "duration": round(duration, 1)})
 
 
 def _reader_thread(task_id, proc, q):

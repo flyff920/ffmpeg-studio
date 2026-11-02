@@ -16,7 +16,14 @@ $owner.StartPosition = 'CenterScreen'
 $owner.Size = New-Object System.Drawing.Size(0, 0)
 $owner.Show()
 
-if ($Mode -eq "save") {
+if ($Mode -eq "folder") {
+    $d = New-Object System.Windows.Forms.FolderBrowserDialog
+    $d.Description = "Select folder"
+    $d.ShowNewFolderButton = $false
+    $result = $d.ShowDialog($owner)
+    $owner.Close()
+    if ($result -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }
+} elseif ($Mode -eq "save") {
     $d = New-Object System.Windows.Forms.SaveFileDialog
     $d.Filter = $Filter
     $d.Title = "Select save location"

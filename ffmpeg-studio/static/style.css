@@ -182,6 +182,24 @@ body {
 .file-input-group { display: flex; gap: 8px; }
 .file-input-group input { flex: 1; }
 
+/* 控件下方的操作按钮行 / 状态提示条 */
+.ctl-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.param-note { display: none; margin-top: 8px; font-size: 12px; line-height: 1.75; color: var(--text-2); }
+.param-note.ok, .param-note.warn, .param-note.err, .param-note.loading { display: block; }
+.param-note.ok,
+.param-note.warn,
+.param-note.err { padding: 8px 12px; border-radius: 0 8px 8px 0; }
+.param-note.ok { color: #12805c; background: #eefaf4; border-left: 3px solid var(--success); }
+.param-note.warn { color: #a86c00; background: #fff8e8; border-left: 3px solid var(--warning); }
+.param-note.err { color: #c8303f; background: #fdeef0; border-left: 3px solid var(--danger); }
+.param-note.loading { color: var(--text-3); }
+.param-note code {
+  background: rgba(79, 110, 247, .1); color: var(--primary);
+  padding: 1px 5px; border-radius: 4px; font-size: 11px;
+}
+.note-link { color: var(--primary); font-weight: 600; text-decoration: none; }
+.note-link:hover { text-decoration: underline; }
+
 /* 帮助说明（可折叠） */
 .help-toggle {
   border: none; background: none; cursor: pointer;

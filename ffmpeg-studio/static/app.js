@@ -15,6 +15,9 @@ const outputDirty = {};    // 输出框是否被用户手动改过
 const VIDEO_FILTER = "视频文件|*.mp4;*.mkv;*.avi;*.mov;*.flv;*.webm;*.ts;*.wmv|所有文件 (*.*)|*.*";
 const AUDIO_FILTER = "音频文件|*.mp3;*.aac;*.wav;*.flac;*.ogg;*.m4a|所有文件 (*.*)|*.*";
 const IMAGE_FILTER = "图片文件|*.png;*.jpg;*.jpeg;*.webp;*.bmp|所有文件 (*.*)|*.*";
+const M3U8_FILTER = "播放列表|*.m3u8;*.m3u|所有文件 (*.*)|*.*";
+const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const FEATURES = [
 /* ==================== 视频处理 ==================== */
@@ -364,6 +367,93 @@ const FEATURES = [
     const a = ["-ss", v.time || "00:00:01", "-i", v.input, "-frames:v", "1"];
     if (v.format === "jpg") a.push("-q:v", "2");
     a.push(v.output);
+    return { argv: a };
+  }
+},
+/* ==================== 网课与流媒体 ==================== */
+{
+  id: "tsmerge", group: "网课与流媒体", icon: "🧩", name: "TS 分片合并",
+  desc: "把 001.ts、002.ts… 上百个分片按顺序拼成一个完整 MP4",
+  tag: "_merged", outExt: "mp4",
+  params: [
+    { key: "dir", label: "分片文件夹", type: "dir", required: true,
+      placeholder: "选择存放 001.ts / 002.ts 的文件夹",
+      help: "选整个文件夹就行，不用一个个挑文件。程序会自动识别分片类型（.ts / .m4s / .mp4 / .flv…），并按文件名里的数字做<b>自然排序</b>——001 → 002 → 010，而不是字典序的 001 → 010 → 002，几百个分片也不会乱序。" },
+    { key: "mode", label: "合并模式", type: "radio", default: "copy",
+      options: [
+        { value: "copy", label: "⚡ 无损拼接（推荐）" },
+        { value: "reencode", label: "🔧 重新编码（修复卡顿）" }
+      ],
+      help: "<b>无损拼接</b>：把码流原样搬运，画质零损失，几百个分片通常几十秒完成；<b>重新编码</b>：当分片时间戳不连续、拼完卡顿/花屏/进度条乱跳时用，会逐帧重编码，慢一些但能重建连续时间戳。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "合并后的 MP4 保存路径，默认按文件夹名自动命名到 outputs 目录。" }
+  ],
+  scanDir: true,
+  needsTsList() { return true; },
+  build(v) {
+    const list = "{TSLIST}";
+    if (v.mode === "reencode") {
+      return { argv: ["-f", "concat", "-safe", "0", "-i", list, "-fflags", "+genpts",
+                      "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+                      "-c:a", "aac", "-b:a", "192k",
+                      "-movflags", "+faststart", v.output] };
+    }
+    return { argv: ["-f", "concat", "-safe", "0", "-i", list, "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    "-movflags", "+faststart", v.output] };
+  }
+},
+{
+  id: "m3u8dl", group: "网课与流媒体", icon: "📥", name: "M3U8 下载",
+  desc: "把 m3u8 播放列表（含加密网课）直接下载成可播放的 MP4",
+  tag: "_download", outExt: "mp4",
+  params: [
+    { key: "url", label: "播放列表地址", type: "url", required: true,
+      placeholder: "https://…/index.m3u8 或本地 .m3u8 文件路径（可多行，每行一集）",
+      help: "m3u8 是一个<b>文本清单</b>，里面按顺序记录了成百上千个 .ts 分片地址。填进来就相当于让 FFmpeg 照着清单把分片全部下载、按序拼接、封装成 MP4。<br><br>链接可以粘贴多行（每行一集），会依次下载并自动加序号；也支持直接选<b>本地的 .m3u8 文件</b>（配合「TS 分片合并」用）。" },
+    { key: "quality", label: "清晰度", type: "select", default: "highest",
+      options: [
+        { value: "highest", label: "最高画质（自动挑最大码率）" },
+        { value: "auto", label: "自动（清单里的第一档）" }
+      ],
+      help: "如果链接是<b>主列表</b>（master，内含 1080P / 720P 多档），这里决定挑哪一档。<b>最高画质</b>会先读取清单、比较各档码率再取最大的那一路；如果你的清单本身只有一个清晰度，这项没有影响。" },
+    { key: "mode", label: "处理方式", type: "radio", default: "copy",
+      options: [
+        { value: "copy", label: "⚡ 原画直存（不重编码）" },
+        { value: "reencode", label: "🎯 转 H.264（兼容最好）" }
+      ],
+      help: "<b>原画直存</b>：分片里的码流直接搬进 MP4，速度只受网速限制，画质无损；<b>转 H.264</b>：某些课程用 HEVC 编码，部分播放器、剪辑软件、旧设备不认，转成 H.264 后到处能播，代价是要重编码、耗时更长。" },
+    { key: "referer", label: "Referer", type: "text", advanced: true,
+      placeholder: "如 https://www.example.com/",
+      help: "网课平台常见的<b>防盗链</b>手段：只允许从自己网站发起的请求读取分片。<b>直接下载报 403 / 404 时先填这个</b>——打开课程页，把浏览器地址栏的站点根地址填进来即可。" },
+    { key: "cookie", label: "Cookie", type: "text", advanced: true,
+      placeholder: "需要登录才给看的课程才填",
+      help: "要登录才能看的课程，把浏览器的 Cookie 整段粘贴进来（F12 → 网络 → 任意请求 → 请求头 → Cookie）。填了就能带上你的登录态去取分片。<b>只在自己付费购买的课程上使用。</b>" },
+    { key: "ua", label: "User-Agent", type: "text", advanced: true, default: DEFAULT_UA,
+      help: "伪装成浏览器发出的请求。默认已填 Chrome 的 UA，大多数站点够用；个别平台校验特定的 UA（如手机端），可以改成对应的值。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "下载后的 MP4 保存路径。填了多个链接时，会自动变成 <code>名字_001.mp4</code>、<code>名字_002.mp4</code>。" }
+  ],
+  needsM3U8: true,
+  multiUrl: true,
+  build(v) {
+    const urls = (v.url || "").split("\n").map(s => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    if (!urls.length) return { error: "请填写播放列表地址" };
+    const a = ["-protocol_whitelist", "file,http,https,tcp,tls,crypto"];
+    if (v.ua) a.push("-user_agent", v.ua);
+    const hs = [];
+    if (v.referer) hs.push("Referer: " + v.referer);
+    if (v.cookie) hs.push("Cookie: " + v.cookie);
+    if (hs.length) a.push("-headers", hs.join("\r\n") + "\r\n");
+    a.push("-allowed_extensions", "ALL");
+    a.push("-i", urls[0]);
+    if (v.mode === "reencode") {
+      a.push("-c:v", "libx264", "-crf", "20", "-preset", "medium",
+             "-c:a", "aac", "-b:a", "192k");
+    } else {
+      a.push("-c", "copy");
+    }
+    a.push("-movflags", "+faststart", v.output);
     return { argv: a };
   }
 },
@@ -1354,6 +1444,33 @@ function stem(p) {
   return i > 0 ? base.slice(0, i) : base;
 }
 
+/** 从路径 / URL / 文件夹里推一个像样的名字：index.m3u8 → 用它的文件夹名 */
+const GENERIC_NAMES = ["index", "playlist", "master", "main", "video", "movie",
+                       "media", "hls", "prog_index", "chunklist", "manifest"];
+function smartStem(p) {
+  const raw = String(p || "").replace(/^"|"$/g, "").replace(/[?#].*$/, "");
+  let name = "";
+  if (/^[a-z]+:\/\//i.test(raw)) {
+    const m = raw.match(/^[a-z]+:\/\/([^/]+)(\/.*)?$/i);
+    const host = (m ? m[1] : "").replace(/:\d+$/, "").replace(/^www\./i, "");
+    const segs = (m && m[2] ? m[2] : "").split("/").filter(Boolean);
+    name = segs.length ? stem(segs[segs.length - 1]) : "";
+    if (!name || GENERIC_NAMES.includes(name.toLowerCase())) {
+      const parent = segs.length >= 2 ? segs[segs.length - 2] : "";
+      name = parent || host;
+    }
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(name) || /localhost/i.test(name)) name = "video";
+  } else {
+    const parts = raw.split(/[\\/]/).filter(Boolean);
+    const base = parts[parts.length - 1] || "";
+    name = base ? stem(base) : "";
+    if (!name || GENERIC_NAMES.includes(name.toLowerCase())) {
+      name = parts.length >= 2 ? parts[parts.length - 2] : "";
+    }
+  }
+  return name || "video";
+}
+
 function dirname(p) {
   const s = String(p).replace(/\\/g, "/");
   const i = s.lastIndexOf("/");
@@ -1384,7 +1501,7 @@ function extFor(f, v) {
 function genOutput(feature, inputPath, extOverride) {
   const ext = extOverride || feature.outExt;
   if (!ext) return "";
-  const name = inputPath ? stem(inputPath) : "output";
+  const name = inputPath ? smartStem(inputPath) : "output";
   if (feature.seq) {
     // 序列类输出：name_0001.png / name_001.mp4
     return `${OUTPUT_DIR}\\${name}${feature.tag}_${feature.seq}.${ext}`;
@@ -1402,7 +1519,7 @@ function highlightCmd(text) {
 }
 
 /* ---------------- 导航渲染 ---------------- */
-const GROUP_ORDER = ["视频处理", "音频处理", "特效与修复", "字幕与叠加", "图像与 GIF", "专业编码与流媒体", "组合工具"];
+const GROUP_ORDER = ["视频处理", "音频处理", "特效与修复", "字幕与叠加", "图像与 GIF", "网课与流媒体", "专业编码与流媒体", "组合工具"];
 
 function renderNav(filter = "") {
   const nav = $("#feature-nav");
@@ -1448,6 +1565,21 @@ function buildControl(f, p) {
         <input type="text" data-key="${p.key}" data-output="1" placeholder="${esc(p.placeholder || '输出路径…（留空自动生成）')}">
         <button class="btn btn-mini btn-save" data-filter="${esc(p.filter || '所有文件 (*.*)|*.*')}">浏览…</button>
       </div>`;
+  } else if (p.type === "dir") {
+    wrap.innerHTML = `
+      <div class="file-input-group">
+        <input type="text" data-key="${p.key}" placeholder="${esc(p.placeholder || '文件夹路径…')}" ${p.required ? 'data-required="1"' : ""}>
+        <button class="btn btn-mini btn-browse-dir">📁 选择文件夹</button>
+      </div>
+      <div class="param-note" data-note="${p.key}"></div>`;
+  } else if (p.type === "url") {
+    wrap.innerHTML = `
+      <textarea data-key="${p.key}" rows="3" placeholder="${esc(p.placeholder || '')}"></textarea>
+      <div class="ctl-actions">
+        <button class="btn btn-mini btn-pick-m3u8" data-filter="${esc(p.filter || M3U8_FILTER)}">选择本地 m3u8</button>
+        <button class="btn btn-mini btn-m3u8-check">🔍 检测播放列表</button>
+      </div>
+      <div class="param-note" data-note="${p.key}"></div>`;
   } else if (p.type === "filelist") {
     wrap.innerHTML = `
       <textarea data-key="${p.key}" placeholder="每行一个文件路径，按顺序合并"></textarea>
@@ -1565,6 +1697,33 @@ function renderParams(f) {
       }
     };
   });
+  // 文件夹选择（TS 分片合并）
+  panel.querySelectorAll(".btn-browse-dir").forEach(btn => {
+    btn.onclick = async () => {
+      const r = await browseDialog({ mode: "folder" });
+      if (r && r.paths.length) {
+        const inp = btn.closest(".file-input-group").querySelector("input");
+        inp.value = r.paths[0];
+        inp.dispatchEvent(new Event("input"));
+        scanDirNow(f);
+      }
+    };
+  });
+  // 本地 m3u8 文件
+  panel.querySelectorAll(".btn-pick-m3u8").forEach(btn => {
+    btn.onclick = async () => {
+      const r = await browseDialog({ mode: "open", filter: btn.dataset.filter });
+      if (r && r.paths.length) {
+        const ta = btn.closest(".param-control").querySelector("textarea");
+        ta.value = (ta.value ? ta.value.replace(/\n+$/, "") + "\n" : "") + r.paths[0];
+        ta.dispatchEvent(new Event("input"));
+      }
+    };
+  });
+  // 检测播放列表
+  panel.querySelectorAll(".btn-m3u8-check").forEach(btn => {
+    btn.onclick = () => checkM3U8(btn);
+  });
 
   // radio 卡片
   panel.querySelectorAll(".radio-cards").forEach(group => {
@@ -1598,6 +1757,141 @@ function renderParams(f) {
   autoFillOutput(f);
   updatePreview();
   applyHwAvailability(f);
+
+  // 分片文件夹：填完自动扫描，立刻告诉用户找到了多少分片
+  if (f.scanDir && paramRefs["dir"]) {
+    const el = paramRefs["dir"];
+    let timer = null;
+    el.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => scanDirNow(f), 700);
+    });
+    el.addEventListener("change", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => scanDirNow(f), 120);
+    });
+    if (el.value) scanDirNow(f);
+  }
+}
+
+/* ---------------- 分片文件夹扫描 / 播放列表检测 ---------------- */
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+  return n + " B";
+}
+
+function fmtDuration(sec) {
+  sec = Math.round(Number(sec) || 0);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const pad = x => String(x).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+async function scanDirNow(f) {
+  const note = document.querySelector('[data-note="dir"]');
+  if (!note) return;
+  const dir = getValue(f, "dir");
+  note.className = "param-note";
+  note.innerHTML = "";
+  if (!dir) return;
+  note.className = "param-note loading";
+  note.textContent = "⏳ 扫描文件夹…";
+  let r;
+  try {
+    r = await fetch("/api/scan-dir", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir }) }).then(x => x.json());
+  } catch (e) {
+    note.className = "param-note err";
+    note.textContent = "⚠ 无法连接后端：" + e;
+    return;
+  }
+  if (!note.isConnected) return;
+  if (!r.ok) { note.className = "param-note err"; note.textContent = "⚠ " + r.error; return; }
+  if (!r.count) {
+    note.className = "param-note warn";
+    note.innerHTML = "⚠ 这个文件夹里没找到分片文件" +
+      (r.found_exts && r.found_exts.length ? `（目录里有 ${r.found_exts.map(esc).join(" ")}）` : "");
+    return;
+  }
+  note.className = "param-note ok";
+  note.innerHTML = `✅ 找到 <b>${r.count}</b> 个 <code>${esc(r.ext)}</code> 分片 · 共 ${fmtSize(r.total)}` +
+                   ` · ${esc(r.first)} → ${esc(r.last)}`;
+  if (r.m3u8) {
+    const a = document.createElement("a");
+    a.href = "#";
+    a.className = "note-link";
+    a.textContent = `目录里有 ${r.m3u8.split(/[\\/]/).pop()}，用它下载更稳 →`;
+    a.onclick = ev => { ev.preventDefault(); jumpToM3u8(r.m3u8); };
+    note.appendChild(document.createElement("br"));
+    note.appendChild(a);
+  }
+}
+
+async function checkM3U8(btn) {
+  const f = currentFeature;
+  const note = btn.closest(".param-control").querySelector(".param-note");
+  const v = collectValues(f);
+  const url = String(v.url || "").split("\n").map(s => s.trim()).filter(Boolean)[0];
+  if (!url) {
+    note.className = "param-note err";
+    note.textContent = "⚠ 请先填写播放列表地址";
+    return;
+  }
+  note.className = "param-note loading";
+  note.textContent = "⏳ 正在读取播放列表…（大清单可能要几秒）";
+  let r;
+  try {
+    const headers = [v.referer ? "Referer: " + v.referer : "", v.cookie ? "Cookie: " + v.cookie : ""]
+      .filter(Boolean).join("\r\n");
+    r = await fetch("/api/m3u8-resolve", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, headers, ua: v.ua, quality: v.quality }) }).then(x => x.json());
+  } catch (e) {
+    note.className = "param-note err";
+    note.textContent = "⚠ 无法连接后端：" + e;
+    return;
+  }
+  if (!r.ok) { note.className = "param-note err"; note.textContent = "⚠ " + r.error; return; }
+
+  const bits = [];
+  if (r.is_master) {
+    bits.push(`✅ 主列表：<b>${r.variant_count}</b> 档清晰度，当前选 <b>${esc((r.selected || {}).label || "")}</b>`);
+  } else {
+    bits.push(`✅ 分片列表：共 <b>${r.segments}</b> 个分片` +
+              (r.duration ? ` · 时长约 ${fmtDuration(r.duration)}` : ""));
+  }
+  if (r.encrypted) {
+    bits.push(r.encrypted === "AES-128"
+      ? "🔐 AES-128 加密（FFmpeg 会自动解密）"
+      : `🔐 ${esc(r.encrypted)} 加密（DRM 类加密无法解密，会下载失败）`);
+  }
+  note.className = "param-note ok";
+  note.innerHTML = bits.join("<br>");
+  if (r.is_master && v.quality !== "highest") {
+    const tip = document.createElement("a");
+    tip.href = "#";
+    tip.className = "note-link";
+    tip.textContent = "想要最高画质？切到「最高画质」再执行 →";
+    tip.onclick = ev => {
+      ev.preventDefault();
+      const sel = document.querySelector('select[data-key="quality"]');
+      if (sel) { sel.value = "highest"; sel.dispatchEvent(new Event("change")); }
+      checkM3U8(btn);
+    };
+    note.appendChild(document.createElement("br"));
+    note.appendChild(tip);
+  }
+}
+
+function jumpToM3u8(path) {
+  selectFeature("m3u8dl");
+  const el = paramRefs["url"];
+  if (!el) return;
+  el.value = path;
+  el.dispatchEvent(new Event("input"));
+  updatePreview();
 }
 
 /* 硬件编码器可用性检测：本机不支持的会标灰 */
@@ -1660,8 +1954,11 @@ function autoFillOutput(f) {
   if (!f.outExt || outputDirty[f.id]) return;
   const outEl = document.querySelector("[data-output]");
   if (!outEl) return;
-  const inputKey = f.params.find(p => p.type === "file");
-  const inputPath = inputKey ? getValue(f, inputKey.key) : "";
+  const inputKey = f.params.find(p => p.type === "file" || p.type === "dir" || p.type === "url");
+  let inputPath = inputKey ? getValue(f, inputKey.key) : "";
+  if (inputKey && inputKey.type === "url") {
+    inputPath = String(inputPath || "").split("\n")[0].trim();
+  }
   // 扩展名联动（如字幕封装随容器切换 mp4/mkv）
   let ext = null;
   if (f.extMap) {
@@ -1690,7 +1987,15 @@ let previewSteps = [];
 let previewError = null;
 
 function cmdLine(argv) {
-  return ["ffmpeg", "-hide_banner", "-y", ...argv].map(q).join(" ");
+  // headers 之类含换行的参数，展示成 \n 字面量，避免把预览框撑成多行
+  return ["ffmpeg", "-hide_banner", "-y", ...argv]
+    .map(a => q(String(a).replace(/\r?\n/g, "\\n"))).join(" ");
+}
+
+/** 预览用：把运行时才生成的列表路径换成人话，不暴露占位符 */
+function displayArgv(argv) {
+  return argv.map(a => (a === "{TSLIST}" || a === "{LIST}")
+    ? "<合并列表 · 运行时自动生成>" : a);
 }
 
 function updatePreview() {
@@ -1716,11 +2021,14 @@ function updatePreview() {
   }
   previewSteps = steps;
   box.classList.toggle("multi", steps.length > 1);
-  box.innerHTML = steps.map((s, i) => {
+  const prelude = f.needsM3U8
+    ? `<span class="cmd-step">执行前会先读取该播放列表${v.quality === "highest" ? "，并自动选码率最高的一路" : ""}</span>\n`
+    : "";
+  box.innerHTML = prelude + steps.map((s, i) => {
     const head = steps.length > 1
       ? `<span class="cmd-step">步骤 ${i + 1}/${steps.length}${s.note ? " · " + esc(s.note) : ""}</span>\n`
       : "";
-    return head + highlightCmd(cmdLine(s.argv));
+    return head + highlightCmd(cmdLine(displayArgv(s.argv)));
   }).join("\n\n");
 }
 
@@ -1865,6 +2173,48 @@ async function executeSteps(steps, cwd) {
   return 0;
 }
 
+/** 把 -i 后面的占位 URL 换成解析后的真实地址 */
+function replaceInputArg(argv, from, to) {
+  const out = argv.slice();
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i] === "-i" && out[i + 1] === from) { out[i + 1] = to; break; }
+  }
+  return out;
+}
+
+/** 多任务输出加序号：A.mp4 → A_001.mp4 */
+function indexOutput(p, i) {
+  const s = String(p);
+  const n = "_" + String(i).padStart(3, "0");
+  const cut = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
+  const dot = s.lastIndexOf(".");
+  if (dot > cut) return s.slice(0, dot) + n + s.slice(dot);
+  return s + n;
+}
+
+/** 执行前解析播放列表：master → 选出目标清晰度的子列表；失败则回落原始地址 */
+async function resolveForRun(v, url) {
+  const headers = [v.referer ? "Referer: " + v.referer : "",
+                   v.cookie ? "Cookie: " + v.cookie : ""].filter(Boolean).join("\r\n");
+  let r = null;
+  try {
+    r = await fetch("/api/m3u8-resolve", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, headers, ua: v.ua, quality: v.quality }) }).then(x => x.json());
+  } catch (e) { /* 网络异常，交给 FFmpeg 自己试 */ }
+  if (!r || !r.ok) {
+    log(`⚠ 预解析失败（${(r && r.error) || "无法连接"}），直接把原地址交给 FFmpeg`, "#f5a623");
+    return url;
+  }
+  if (r.is_master) {
+    log(`🔎 主列表 ${r.variant_count} 档清晰度 → 选中 ${r.selected ? r.selected.label : "默认档"}`, "#7cc7ff");
+  } else {
+    log(`🔎 分片列表：${r.segments} 个分片` + (r.duration ? `，时长约 ${fmtDuration(r.duration)}` : ""), "#7cc7ff");
+  }
+  if (r.encrypted === "AES-128") log("🔐 AES-128 加密：FFmpeg 会自动取密钥解密", "#7cc7ff");
+  else if (r.encrypted) log(`⚠ 检测到 ${r.encrypted} 加密（DRM 类），FFmpeg 无法解密，大概率失败`, "#f5a623");
+  return r.url || url;
+}
+
 async function runCurrent() {
   const f = currentFeature;
   if (!f) return;
@@ -1915,20 +2265,79 @@ async function runCurrent() {
     log(`已生成合并列表: ${r.path}（${r.count} 个文件）`, "#8a99ad");
   }
 
+  // TS 分片合并：扫描文件夹，按序号生成 concat 列表
+  if (f.needsTsList && f.needsTsList(v)) {
+    setStatus("扫描分片…", "running");
+    const r = await fetch("/api/ts-list", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: v.dir }) }).then(r => r.json());
+    if (!r.ok) { log("扫描分片失败：" + r.error, "#ef4b5f"); setStatus("扫描失败", "error"); return; }
+    steps.forEach(s => { s.argv = s.argv.map(a => a === "{TSLIST}" ? r.path : a); });
+    log(`📂 已扫描 ${r.count} 个 ${r.ext} 分片（${fmtSize(r.total)}）`, "#7cc7ff");
+    log(`   顺序：${r.first} → ${r.last}`, "#7cc7ff");
+    log(`   列表文件：${r.path}`, "#8a99ad");
+    if (r.m3u8) log(`💡 该目录还有 ${r.m3u8.split(/[\\/]/).pop()}，若合并后卡顿可改用「M3U8 下载」`, "#8a99ad");
+  }
+
+  // M3U8 下载：支持多行链接，逐条执行
+  let jobs = null, tmplUrl = "";
+  if (f.needsM3U8) {
+    const urls = String(v.url || "").split("\n").map(s => s.trim()).filter(Boolean);
+    if (!urls.length) { log("请填写播放列表地址", "#ef4b5f"); return; }
+    tmplUrl = urls[0];
+    jobs = urls.map((u, i) => ({
+      url: u,
+      output: urls.length === 1 ? v.output : indexOutput(v.output, i + 1)
+    }));
+    if (jobs.length > 1) log(`📥 共 ${jobs.length} 个播放列表，依次下载`, "#7cc7ff");
+  }
+
   setRunningUI(true);
-  setStatus("⏳ 执行中…", "running");
+  setStatus(jobs ? "⏳ 解析播放列表…" : "⏳ 执行中…", "running");
   userStopped = false;
   stopPending = false;
-  const code = await executeSteps(steps, v.output ? dirname(v.output) : "");
+
+  let code = 0;
+  let lastOutput = v.output;
+  if (jobs) {
+    let okJobs = 0, failJobs = 0;
+    for (let i = 0; i < jobs.length; i++) {
+      if (userStopped) break;
+      const job = jobs[i];
+      lastOutput = job.output;
+      if (jobs.length > 1) {
+        log(`\n━━━ [${i + 1}/${jobs.length}] ${job.output.split(/[\\/]/).pop()} ━━━`, "#8a99ad");
+        log(`🔗 ${job.url}`, "#8a99ad");
+      }
+      const src = await resolveForRun(v, job.url);
+      if (userStopped) break;
+      const jobSteps = steps.map(s => {
+        const argv = replaceInputArg(s.argv, tmplUrl, src);
+        argv[argv.length - 1] = job.output;
+        return { argv, note: s.note };
+      });
+      code = await executeSteps(jobSteps, dirname(job.output));
+      if (userStopped) break;
+      if (code === 0) { okJobs++; log(`✅ 完成：${job.output}`, "#22b07d"); }
+      else { failJobs++; log(`❌ 失败（退出码 ${code}），继续下一个`, "#ef4b5f"); }
+    }
+    if (jobs.length > 1) {
+      const msg = `共 ${jobs.length} 个：成功 ${okJobs} 个` + (failJobs ? `，失败 ${failJobs} 个` : "");
+      log("\n" + msg, failJobs ? "#f5a623" : "#22b07d");
+      code = failJobs ? 1 : 0;
+    }
+  } else {
+    code = await executeSteps(steps, v.output ? dirname(v.output) : "");
+  }
+
   setRunningUI(false);
   stopPending = false;
 
   if (userStopped) {
-    await finishStopped(v.output, code);
+    await finishStopped(lastOutput, code);
   } else if (code === 0) {
     setStatus("✅ 执行成功", "success");
     log("\n✅ 任务完成！", "#22b07d");
-    if (v.output) log(`📁 输出文件: ${v.output}`, "#22b07d");
+    if (!jobs && v.output) log(`📁 输出文件: ${v.output}`, "#22b07d");
   } else {
     setStatus(`❌ 执行失败 (退出码 ${code})`, "error");
     log(`\n❌ FFmpeg 退出码: ${code}，请检查上方红色错误信息`, "#ef4b5f");
