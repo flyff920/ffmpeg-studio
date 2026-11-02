@@ -1142,6 +1142,33 @@ const FEATURES = [
 
 /* ==================== 特效与修复 ==================== */
 {
+  id: "delogo", group: "特效与修复", icon: "🩹", name: "去除水印",
+  desc: "框选水印位置，用周围像素把这一块补齐",
+  tag: "_clean", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要处理水印的视频。水印是硬烧在画面上的像素，没有<b>原始图层</b>可以删，只能<b>用周围的画面把那一块补上</b>——所以背景越干净（纯色、渐变、虚化、天空）效果越好，压在人脸或复杂纹理上会有涂抹感。" },
+    { key: "region", label: "水印区域", type: "region", required: true,
+      help: "点「抓取画面并框选」，再在图上把水印整个框进去。<b>框得比水印略大一圈</b>（外面留 2~4 像素）：太小会残留边线，太大会带走过多真实画面。<br><br>抓完可以点「预览效果」直接看这一帧补成什么样，不满意就重新框。四个数值按视频<b>原始分辨率</b>换算，手改数字时图上的框会跟着动。<br><br>注意：水印如果会<b>移动</b>（位置随时间变化），固定区域只能压住它经过的一部分，效果有限。" },
+    { key: "band", label: "边缘采样带", type: "number", default: 1, advanced: true,
+      help: "delogo 从框<b>外圈</b>取像素往内插值，这个值决定取多宽的一圈。默认 1 适合小水印；水印块很大、补完出现明显条纹时，调到 3~5 会更平滑。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "处理后的视频路径。去水印必须重编码，默认 CRF 18 保画质。" }
+  ],
+  build(v) {
+    const r = v.region || {};
+    if (!r.w || !r.h) return { error: "请先点「抓取画面并框选」，在画面上框出水印位置" };
+    if (r.vw && r.vh && (r.x + r.w > r.vw || r.y + r.h > r.vh)) {
+      return { error: `框超出画面了：画面是 ${r.vw}×${r.vh}，当前框的右下角在 (${r.x + r.w}, ${r.y + r.h})，把宽高或位置调小些` };
+    }
+    const band = Number(v.band) || 1;
+    let fc = `delogo=x=${r.x}:y=${r.y}:w=${r.w}:h=${r.h}`;
+    if (band > 1) fc += `:band=${band}`;
+    return { argv: ["-i", v.input, "-vf", fc,
+      "-map", "0:v", "-map", "0:a?", "-c:v", "libx264", "-crf", "18", "-c:a", "copy", v.output] };
+  }
+},
+{
   id: "chromakey", group: "特效与修复", icon: "🟩", name: "色键抠图",
   desc: "把绿幕/蓝幕抠掉，换成图片或视频背景",
   tag: "_keyed", outExt: "mp4",
@@ -1644,11 +1671,184 @@ function renderNav(filter = "") {
   });
 }
 
+/* ---------------- 水印区域框选 ---------------- */
+function bindRegionPicker() {
+  const picker = document.querySelector(".region-picker");
+  if (!picker) return;
+  const stage = picker.querySelector(".region-stage");
+  const img = picker.querySelector(".region-img");
+  const box = picker.querySelector(".region-box");
+  const status = picker.querySelector(".region-status");
+  const btnSnap = picker.querySelector(".btn-snap");
+  const btnPrev = picker.querySelector(".btn-snap-vf");
+  const timeInp = picker.querySelector("[data-snap-time]");
+  const F = k => picker.querySelector(`[data-rk="${k}"]`);
+
+  let origW = 0, origH = 0;      // 视频原始分辨率
+  let hasFrame = false;
+
+  const say = (t, cls) => {
+    status.textContent = t;
+    status.className = "region-status" + (cls ? " " + cls : "");
+  };
+  const region = () => ({
+    x: Math.max(0, Math.round(Number(F("x").value) || 0)),
+    y: Math.max(0, Math.round(Number(F("y").value) || 0)),
+    w: Math.max(0, Math.round(Number(F("w").value) || 0)),
+    h: Math.max(0, Math.round(Number(F("h").value) || 0))
+  });
+
+  // 图片在 stage 里可能居中留白，算框位置时要带上这个偏移
+  const offOf = () => {
+    const r = img.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    return { r, ox: r.left - s.left, oy: r.top - s.top };
+  };
+
+  // 手动改数字时，把框反向画回图上
+  const syncBoxFromValues = () => {
+    if (!hasFrame) return;
+    const { r, ox, oy } = offOf();
+    if (!r.width || !origW) return;
+    const k = r.width / origW;
+    const { x, y, w, h } = region();
+    if (w <= 0 || h <= 0) { box.classList.add("hidden"); return; }
+    box.classList.remove("hidden");
+    const out = origW > 0 && (x + w > origW || y + h > origH);
+    box.classList.toggle("out", out);
+    box.style.left = (ox + x * k) + "px";
+    box.style.top = (oy + y * k) + "px";
+    box.style.width = (w * k) + "px";
+    box.style.height = (h * k) + "px";
+  };
+
+  // 抓帧：extraVf 为空取原图，否则返回套了 delogo 的效果图
+  const grab = async (extraVf) => {
+    const path = (getValue(currentFeature, "input") || "").trim();
+    if (!path) { say("请先选择视频文件", "warn"); return; }
+    say(extraVf ? "正在生成效果预览…" : "正在抓取画面…");
+    btnSnap.disabled = true;
+    btnPrev.disabled = true;
+    try {
+      const r = await fetch("/api/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, time: Number(timeInp.value) || 0, vf: extraVf || "" })
+      }).then(x => x.json());
+      if (!r.ok) { say(r.error || "抓取失败", "warn"); return; }
+      origW = r.width || 0;
+      origH = r.height || 0;
+      picker.dataset.vw = origW;
+      picker.dataset.vh = origH;
+      await new Promise(res => {
+        img.onload = res; img.onerror = res;
+        img.src = r.img;
+        if (img.complete) res();
+      });
+      stage.classList.remove("hidden");
+      hasFrame = true;
+      syncBoxFromValues();
+      btnPrev.disabled = false;
+      say(extraVf
+        ? "已套用去水印效果预览，满意就点「开始执行」"
+        : `已载入画面 ${origW}×${origH}，在图上拖拽框住水印`, "ok");
+    } catch (e) {
+      say("抓取失败：" + e.message, "warn");
+    } finally {
+      btnSnap.disabled = false;
+    }
+  };
+
+  btnSnap.onclick = () => grab("");
+  btnPrev.onclick = () => {
+    const { x, y, w, h } = region();
+    if (w <= 0 || h <= 0) { say("先在图上框选，或手动填写宽高", "warn"); return; }
+    grab(`delogo=x=${x}:y=${y}:w=${w}:h=${h}`);
+  };
+
+  // 拖拽框选
+  let drag = null;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  stage.addEventListener("pointerdown", e => {
+    if (!hasFrame) return;
+    const { r, ox, oy } = offOf();
+    drag = {
+      x0: clamp(e.clientX - r.left, 0, r.width),
+      y0: clamp(e.clientY - r.top, 0, r.height),
+      r, ox, oy
+    };
+    try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    box.classList.remove("hidden");
+    box.style.left = (ox + drag.x0) + "px";
+    box.style.top = (oy + drag.y0) + "px";
+    box.style.width = "0px";
+    box.style.height = "0px";
+    e.preventDefault();
+  });
+
+  stage.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const { r } = drag;
+    const x1 = clamp(e.clientX - r.left, 0, r.width);
+    const y1 = clamp(e.clientY - r.top, 0, r.height);
+    const left = Math.min(drag.x0, x1), top = Math.min(drag.y0, y1);
+    const w = Math.abs(x1 - drag.x0), h = Math.abs(y1 - drag.y0);
+    box.style.left = (drag.ox + left) + "px";
+    box.style.top = (drag.oy + top) + "px";
+    box.style.width = w + "px";
+    box.style.height = h + "px";
+    drag.cur = { left, top, w, h };
+  });
+
+  stage.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const cur = drag.cur;
+    const r = drag.r;
+    drag = null;
+    if (!cur || cur.w < 3 || cur.h < 3) {
+      say("框太小了，重新拖一次", "warn");
+      box.classList.add("hidden");
+      return;
+    }
+    const k = origW / r.width;          // 显示像素 → 视频像素
+    F("x").value = Math.round(cur.left * k);
+    F("y").value = Math.round(cur.top * k);
+    F("w").value = Math.round(cur.w * k);
+    F("h").value = Math.round(cur.h * k);
+    F("x").dispatchEvent(new Event("input", { bubbles: true }));
+    say(`已框选 ${F("w").value}×${F("h").value}，可点「预览效果」确认`, "ok");
+    syncBoxFromValues();
+  });
+
+  ["x", "y", "w", "h"].forEach(k => F(k).addEventListener("input", syncBoxFromValues));
+  window.addEventListener("resize", syncBoxFromValues);
+}
+
 /* ---------------- 参数控件渲染 ---------------- */
 function buildControl(f, p) {
   const wrap = document.createElement("div");
   const id = `${f.id}.${p.key}`;
-  if (p.type === "file") {
+  if (p.type === "region") {
+    wrap.innerHTML = `
+      <div class="region-picker" data-key="${p.key}">
+        <div class="region-toolbar">
+          <button class="btn btn-mini btn-snap">📷 抓取画面并框选</button>
+          <button class="btn btn-mini btn-snap-vf" disabled>👁 预览效果</button>
+          <label class="region-time">取帧 <input type="number" data-snap-time value="1" min="0" step="1"> 秒</label>
+        </div>
+        <div class="region-status">先选好视频，再点「抓取画面并框选」；在画面上拖拽框住水印即可</div>
+        <div class="region-stage hidden">
+          <img class="region-img" alt="预览帧">
+          <div class="region-box hidden"></div>
+        </div>
+        <div class="region-fields">
+          <label>X <input type="number" data-rk="x" value="0" min="0"></label>
+          <label>Y <input type="number" data-rk="y" value="0" min="0"></label>
+          <label>宽 <input type="number" data-rk="w" value="0" min="0"></label>
+          <label>高 <input type="number" data-rk="h" value="0" min="0"></label>
+        </div>
+      </div>`;
+  } else if (p.type === "file") {
     wrap.innerHTML = `
       <div class="file-input-group">
         <input type="text" data-key="${p.key}" placeholder="${esc(p.placeholder || '文件路径…')}" ${p.required ? 'data-required="1"' : ""}>
@@ -1869,6 +2069,7 @@ function renderParams(f) {
   autoFillOutput(f);
   updatePreview();
   applyHwAvailability(f);
+  bindRegionPicker();
 
   // 分片文件夹：填完自动扫描，立刻告诉用户找到了多少分片
   if (f.scanDir && paramRefs["dir"]) {
@@ -2048,6 +2249,16 @@ function getValue(f, key) {
   const p = f.params.find(x => x.key === key);
   const el = paramRefs[key];
   if (!el || !p) return undefined;
+  if (p.type === "region") {
+    const g = k => {
+      const i = el.querySelector(`[data-rk="${k}"]`);
+      return Math.max(0, Math.round(Number(i && i.value) || 0));
+    };
+    return {
+      x: g("x"), y: g("y"), w: g("w"), h: g("h"),
+      vw: Number(el.dataset.vw) || 0, vh: Number(el.dataset.vh) || 0
+    };
+  }
   if (p.type === "radio") {
     const c = el.querySelector(".radio-card.checked");
     return c ? c.dataset.value : p.default;

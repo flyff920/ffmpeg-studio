@@ -180,6 +180,55 @@ body {
 .param-control textarea { resize: vertical; min-height: 70px; font-family: Consolas, monospace; font-size: 12px; }
 .param-control textarea.text-plain { font-family: inherit; font-size: 13px; min-height: 54px; }
 
+/* 水印区域框选 */
+.region-picker {
+  border: 1px dashed #cfd8e8; border-radius: 10px; padding: 10px 12px;
+  background: #fafbff;
+}
+.region-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.region-time {
+  font-size: 12px; color: var(--text-3); margin-left: auto;
+  display: inline-flex; align-items: center; gap: 4px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.param-control .region-time input[type="number"] {
+  width: 58px; padding: 4px 6px; border: 1px solid var(--border);
+  border-radius: 6px; font-size: 12px; background: #fff; color: var(--text);
+}
+.region-status { margin-top: 8px; font-size: 12px; color: var(--text-3); line-height: 1.6; }
+.region-status.ok { color: #12805c; }
+.region-status.warn { color: var(--danger); }
+.region-stage {
+  position: relative; margin-top: 10px; border-radius: 8px; overflow: hidden;
+  background: #10151f; cursor: crosshair; touch-action: none;
+  user-select: none; -webkit-user-select: none; text-align: center;
+}
+.region-img {
+  display: block; max-width: 100%; max-height: 430px;
+  width: auto; height: auto; margin: 0 auto;
+  -webkit-user-drag: none; user-select: none; pointer-events: none;
+}
+.region-box {
+  position: absolute; border: 3px solid var(--danger);
+  background: rgba(239, 75, 95, .14);
+  box-shadow: 0 0 0 9999px rgba(16, 21, 31, .38);
+  pointer-events: none; border-radius: 2px;
+}
+.region-box.out { border-color: var(--warning); background: rgba(245, 166, 35, .16); }
+.region-fields { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.region-fields label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-3);
+}
+.param-control .region-fields input[type="number"] {
+  width: 100%; min-width: 0; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12px; background: #fff; color: var(--text); outline: none;
+}
+.param-control .region-fields input[type="number"]:focus {
+  border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 110, 247, .12);
+}
+
 .file-input-group { display: flex; gap: 8px; }
 .file-input-group input { flex: 1; }
 

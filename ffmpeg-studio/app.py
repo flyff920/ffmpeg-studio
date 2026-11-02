@@ -4,6 +4,7 @@ FFmpeg Studio - Flask 后端
 职责：接收前端构建好的参数，执行 ffmpeg/ffprobe，实时回传日志。
 不做任何对 FFmpeg 原始功能的修改，仅做可视化封装。
 """
+import base64
 import json
 import os
 import queue
@@ -135,6 +136,74 @@ def api_probe():
         return jsonify({"ok": True, "data": data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/snapshot", methods=["POST"])
+def api_snapshot():
+    """抽一帧画面给前端做水印框选。
+
+    可选传入 vf（如 delogo=...），返回套用滤镜后的帧，用于「先看效果再执行」。
+    坐标始终基于原始分辨率，缩放只影响返回图片的大小。
+    """
+    body = request.json or {}
+    path = (body.get("path") or "").strip().strip('"')
+    if not path or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "文件不存在: " + path})
+    try:
+        t = max(0.0, float(body.get("time") or 1))
+    except (TypeError, ValueError):
+        t = 1.0
+    vf_extra = (body.get("vf") or "").strip()
+    try:
+        max_w = int(body.get("max_width") or 960)
+    except (TypeError, ValueError):
+        max_w = 960
+
+    # 取原始分辨率：前端据此把拖拽框换算回真实坐标
+    ow = oh = 0
+    try:
+        p = subprocess.run([FFPROBE_BIN, "-v", "quiet", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=30)
+        parts = (p.stdout or "").strip().splitlines()[0].split(",")
+        ow, oh = int(parts[0]), int(parts[1])
+    except Exception:
+        ow = oh = 0
+
+    chains = []
+    if vf_extra:
+        chains.append(vf_extra)          # 滤镜先在原始分辨率上做，坐标才准
+    if ow and ow > max_w:
+        chains.append("scale=%d:-2" % max_w)
+    vf = ",".join(chains)
+
+    fd, tmp = tempfile.mkstemp(prefix="snap_", suffix=".jpg")
+    os.close(fd)
+    cmd = [FFMPEG_BIN, "-hide_banner", "-v", "error", "-y", "-ss", "%.3f" % t,
+           "-i", path, "-frames:v", "1", "-q:v", "3"]
+    if vf:
+        cmd += ["-vf", vf]
+    cmd.append(tmp)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=90)
+    except Exception as e:
+        r = None
+        err = str(e)
+    if r is None or r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        err = (r.stderr.strip()[:300] if r is not None and r.stderr else locals().get("err", "未知错误"))
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return jsonify({"ok": False, "error": "抽帧失败：" + (err or "未知错误")})
+
+    with open(tmp, "rb") as fp:
+        data = fp.read()
+    os.remove(tmp)
+    return jsonify({
+        "ok": True,
+        "img": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii"),
+        "width": ow, "height": oh,
+    })
 
 
 @app.route("/api/browse", methods=["POST"])
