@@ -80,6 +80,47 @@ def api_hw_encoders():
     return jsonify({"ok": True, "encoders": result})
 
 
+FONT_CANDIDATES = [
+    ("msyh",    "微软雅黑",      r"Fonts\msyh.ttc"),
+    ("msyhbd",  "微软雅黑 粗体",  r"Fonts\msyhbd.ttc"),
+    ("simhei",  "黑体",          r"Fonts\simhei.ttf"),
+    ("simsun",  "宋体",          r"Fonts\simsun.ttc"),
+    ("simkai",  "楷体",          r"Fonts\simkai.ttf"),
+    ("arial",   "Arial",         r"Fonts\arial.ttf"),
+    ("segoeui", "Segoe UI",      r"Fonts\segoeui.ttf"),
+]
+
+
+@app.route("/api/fonts")
+def api_fonts():
+    """列出本机可用的字体文件，供文字水印选择（drawtext 需要真实字体路径）"""
+    windir = os.environ.get("WINDIR") or r"C:\Windows"
+    fonts = []
+    for key, label, rel in FONT_CANDIDATES:
+        path = os.path.join(windir, rel)
+        if os.path.exists(path):
+            fonts.append({"key": key, "label": label, "path": path.replace("\\", "/")})
+    return jsonify({"ok": bool(fonts), "fonts": fonts})
+
+
+@app.route("/api/textfile", methods=["POST"])
+def api_textfile():
+    """把 drawtext 要显示的文字写成 UTF-8 临时文件。
+
+    文字直接内联进 filtergraph 时，一旦同时出现单引号和冒号/百分号，
+    引号配对就会错位并吞掉后面的参数；写入文件可彻底避开转义问题，
+    顺带支持多行文字。
+    """
+    body = request.json or {}
+    text = body.get("text", "")
+    if not isinstance(text, str):
+        return jsonify({"ok": False, "error": "文字格式不正确"})
+    fd, path = tempfile.mkstemp(prefix="drawtext_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write(text)
+    return jsonify({"ok": True, "path": path})
+
+
 @app.route("/api/probe", methods=["POST"])
 def api_probe():
     path = (request.json or {}).get("path", "").strip().strip('"')

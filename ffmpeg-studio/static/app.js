@@ -19,6 +19,37 @@ const M3U8_FILTER = "播放列表|*.m3u8;*.m3u|所有文件 (*.*)|*.*";
 const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+/* drawtext 需要真实字体文件路径；启动时由 /api/fonts 用本机实际存在的字体覆盖 */
+let FONT_LIST = [
+  { key: "msyh", path: "C:/Windows/Fonts/msyh.ttc", label: "微软雅黑" },
+  { key: "simhei", path: "C:/Windows/Fonts/simhei.ttf", label: "黑体" },
+  { key: "simsun", path: "C:/Windows/Fonts/simsun.ttc", label: "宋体" },
+  { key: "arial", path: "C:/Windows/Fonts/arial.ttf", label: "Arial" }
+];
+
+async function loadFonts() {
+  try {
+    const r = await fetch("/api/fonts").then(x => x.json());
+    if (r.ok && r.fonts && r.fonts.length) FONT_LIST = r.fonts;
+  } catch (e) { /* 接口异常时沿用上面的默认列表 */ }
+}
+
+function fontPath(key) {
+  const f = FONT_LIST.find(x => x.key === key) || FONT_LIST[0];
+  return f ? f.path : "C:/Windows/Fonts/arial.ttf";
+}
+
+/** drawtext 的文字走临时文件：内联进 filtergraph 时，同时出现单引号与冒号/百分号会
+ *  让引号配对错位、吞掉后面的参数，写入文件可绕开全部转义问题，也顺带支持多行 */
+async function writeTextFile(text) {
+  const r = await fetch("/api/textfile", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: String(text == null ? "" : text) })
+  }).then(x => x.json());
+  if (!r.ok) throw new Error(r.error || "写入文字失败");
+  return fpath(r.path);
+}
+
 const FEATURES = [
 /* ==================== 视频处理 ==================== */
 {
@@ -249,6 +280,70 @@ const FEATURES = [
     return { argv: ["-i", v.input, "-i", v.wm, "-filter_complex",
       `[1:v]format=rgba,colorchannelmixer=aa=${v.opacity}[wm];[0:v][wm]overlay=${posMap[v.pos]}[v]`,
       "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "18", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "text_watermark", group: "视频处理", icon: "🔤", name: "添加文字水印",
+  desc: "把署名、版权、账号等文字直接印在画面角落",
+  tag: "_textwm", outExt: "mp4",
+  needsTextFile: true,
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要加文字水印的视频。文字会被<b>烧进画面</b>变成像素，任何播放器、任何网站都能看到，也没法关掉；如果需要保留可开关的独立字幕轨，请用「字幕封装」。" },
+    { key: "text", label: "水印文字", type: "text", required: true, default: "© 2026 你的名字", multiline: true,
+      placeholder: "如 © 2026 张三　　或　　@yourname",
+      help: "中文、英文、数字以及 © · ¥ 等符号都支持，<b>可以多行</b>（回车换行会原样印成两行）。文字会先写入一个临时文本文件再交给 FFmpeg，所以冒号、百分号、单引号这些平时最容易报错的字符可以随便写。" },
+    { key: "font", label: "字体", type: "select", dynamic: "fonts", default: "msyh",
+      help: "只能选<b>本机已安装</b>的字体（列表实时探测）。<b>微软雅黑</b>中文最清晰通用；纯英文水印用 Arial / Segoe UI 更秀气；「粗体」字重更粗，压在复杂背景上更醒目。" },
+    { key: "size", label: "字号 (px)", type: "number", default: 40,
+      help: "以 <b>1080p 画面</b>为基准的像素高度，40 大约是一行小字、56 是中等标题。4K 素材不用手动翻倍——下面「随分辨率缩放」开着时会按画面高度自动换算。" },
+    { key: "pos", label: "水印位置", type: "radio", default: "br",
+      options: [
+        { value: "tl", label: "左上" }, { value: "tr", label: "右上" },
+        { value: "bl", label: "左下" }, { value: "br", label: "右下" },
+        { value: "center", label: "居中" }
+      ],
+      help: "文字放在哪个角。<b>右下 / 左下</b>最不影响观看；居中会挡住主体，一般只用于样片打标。" },
+    { key: "margin", label: "边距 (px)", type: "number", default: 24,
+      help: "文字距离画面边缘的像素距离，对「居中」无效。竖屏视频建议调到 40 以上，避免被平台裁切掉。" },
+    { key: "color", label: "文字颜色", type: "color", default: "#FFFFFF",
+      help: "点右侧色块直接取色。<b>白色</b>最百搭；如果压在浅色/高亮画面上看不清，把下面的「描边宽度」调到 2~3 即可。" },
+    { key: "autoscale", label: "随分辨率缩放", type: "switch", default: true, advanced: true,
+      help: "开启后字号按 <b>画面高度 ÷ 1080</b> 自动换算：同一套参数用在 720p 和 4K 上，水印占画面的比例基本一致。关闭则按填写的像素数硬写。" },
+    { key: "border", label: "描边宽度 (px)", type: "number", default: 2, advanced: true,
+      help: "文字外圈的描边宽度，<b>0 表示不描边</b>。作用是让文字在浅色、杂乱的背景上依然清晰，白字配 2px 黑边是最稳的组合。" },
+    { key: "bordercolor", label: "描边颜色", type: "color", default: "#000000", advanced: true,
+      help: "描边颜色，与文字颜色反差越大越好（白字黑边、黑字白边）。" },
+    { key: "box", label: "半透明底衬", type: "switch", default: false, advanced: true,
+      help: "在文字背后铺一块半透明黑色色块，类似字幕条。适合水印正好落在花哨画面上、连描边也压不住的情况。" },
+    { key: "opacity", label: "不透明度", type: "range", default: 1, min: 0.1, max: 1, step: 0.05, advanced: true,
+      help: "1 为完全不透明，0.3 左右是「隐约可见」的淡水印。降低不透明度也能减轻对画面的干扰。" },
+    { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
+      help: "结果保存路径。烧录文字必须重新编码，默认 CRF 18 保持高画质。" }
+  ],
+  build(v) {
+    const m = Number(v.margin) || 0;
+    const base = Number(v.size) || 40;
+    // 随分辨率缩放：按 1080p 为基准换算，用表达式让 FFmpeg 按实际画面高度计算
+    const fsx = v.autoscale ? `h*${base}/1080` : String(base);
+    const posMap = {
+      tl: [`${m}`, `${m}`],
+      tr: [`w-text_w-${m}`, `${m}`],
+      bl: [`${m}`, `h-text_h-${m}`],
+      br: [`w-text_w-${m}`, `h-text_h-${m}`],
+      center: ["(w-text_w)/2", "(h-text_h)/2"]
+    };
+    const [px, py] = posMap[v.pos] || posMap.br;
+    let fc = `drawtext=fontfile='${fpath(fontPath(v.font))}'` +
+             `:textfile='{TEXTFILE}'` +
+             `:expansion=none` +
+             `:fontcolor=${v.color}:fontsize=${fsx}` +
+             `:x=${px}:y=${py}` +
+             `:alpha=${v.opacity}`;
+    if (Number(v.border) > 0) fc += `:borderw=${Number(v.border)}:bordercolor=${v.bordercolor}`;
+    if (v.box) fc += `:box=1:boxcolor=black@0.4:boxborderw=10`;
+    return { argv: ["-i", v.input, "-vf", fc,
+      "-map", "0:v", "-map", "0:a?", "-c:v", "libx264", "-crf", "18", "-c:a", "copy", v.output] };
   }
 },
 /* ==================== 音频处理 ==================== */
@@ -1585,10 +1680,19 @@ function buildControl(f, p) {
       <textarea data-key="${p.key}" placeholder="每行一个文件路径，按顺序合并"></textarea>
       <div style="margin-top:6px"><button class="btn btn-mini btn-browse-multi" data-filter="${esc(p.filter || '')}">＋ 添加文件（可多选）</button></div>`;
   } else if (p.type === "select") {
-    wrap.innerHTML = `<select data-key="${p.key}">${p.options.map(o => {
+    const opts = p.dynamic === "fonts"
+      ? FONT_LIST.map(x => ({ value: x.key, label: x.label }))
+      : p.options;
+    wrap.innerHTML = `<select data-key="${p.key}">${opts.map(o => {
       const v = typeof o === "object" ? o.value : o, l = typeof o === "object" ? o.label : o;
       return `<option value="${esc(v)}" ${v === p.default ? "selected" : ""}>${esc(l)}</option>`;
     }).join("")}</select>`;
+  } else if (p.type === "color") {
+    const init = p.default || "#ffffff";
+    wrap.innerHTML = `<div class="color-wrap">
+      <input type="color" data-key="${p.key}" value="${init}">
+      <span class="color-hex">${init.toUpperCase()}</span>
+    </div>`;
   } else if (p.type === "radio") {
     wrap.innerHTML = `<div class="radio-cards" data-key="${p.key}">${p.options.map(o =>
       `<span class="radio-card ${o.value === p.default ? "checked" : ""}" data-value="${esc(o.value)}">${esc(o.label)}</span>`
@@ -1603,6 +1707,8 @@ function buildControl(f, p) {
       <span class="range-val">${p.default}${p.unit || ""}</span></div>`;
   } else if (p.type === "number") {
     wrap.innerHTML = `<input type="number" data-key="${p.key}" value="${p.default ?? ""}" placeholder="${esc(p.placeholder || "")}">`;
+  } else if (p.multiline) {
+    wrap.innerHTML = `<textarea class="text-plain" data-key="${p.key}" rows="2" placeholder="${esc(p.placeholder || "")}">${esc(p.default ?? "")}</textarea>`;
   } else {
     wrap.innerHTML = `<input type="text" data-key="${p.key}" value="${p.default ?? ""}" placeholder="${esc(p.placeholder || "")}">`;
   }
@@ -1661,6 +1767,12 @@ function renderParams(f) {
     paramRefs[key] = el.closest(".radio-cards") || el;
     el.addEventListener("input", onParamChange);
     el.addEventListener("change", onParamChange);
+  });
+
+  // 颜色控件：色块变化时同步旁边的十六进制值
+  panel.querySelectorAll('input[type="color"]').forEach(inp => {
+    const hex = inp.closest(".color-wrap") && inp.closest(".color-wrap").querySelector(".color-hex");
+    if (hex) inp.addEventListener("input", () => { hex.textContent = inp.value.toUpperCase(); });
   });
 
   // 单文件浏览
@@ -1994,8 +2106,10 @@ function cmdLine(argv) {
 
 /** 预览用：把运行时才生成的列表路径换成人话，不暴露占位符 */
 function displayArgv(argv) {
-  return argv.map(a => (a === "{TSLIST}" || a === "{LIST}")
-    ? "<合并列表 · 运行时自动生成>" : a);
+  return argv.map(a => {
+    if (a === "{TSLIST}" || a === "{LIST}") return "<合并列表 · 运行时自动生成>";
+    return String(a).replace("textfile='{TEXTFILE}'", "textfile='<水印文字 · 运行时写入>'");
+  });
 }
 
 function updatePreview() {
@@ -2278,6 +2392,18 @@ async function runCurrent() {
     if (r.m3u8) log(`💡 该目录还有 ${r.m3u8.split(/[\\/]/).pop()}，若合并后卡顿可改用「M3U8 下载」`, "#8a99ad");
   }
 
+  // 文字水印：把文字写入临时文件，替换 argv 里的占位符
+  if (f.needsTextFile) {
+    try {
+      const tp = await writeTextFile(v.text);
+      steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{TEXTFILE}", tp)); });
+    } catch (e) {
+      log("写入水印文字失败：" + e.message, "#ef4b5f");
+      setStatus("准备失败", "error");
+      return;
+    }
+  }
+
   // M3U8 下载：支持多行链接，逐条执行
   let jobs = null, tmplUrl = "";
   if (f.needsM3U8) {
@@ -2467,6 +2593,13 @@ async function runBatch() {
   batchStopFlag = false;
   userStopped = false;
   stopPending = false;
+
+  // 文字水印：整批共用同一个文字文件
+  let textPath = "";
+  if (f.needsTextFile) {
+    try { textPath = await writeTextFile(baseVals.text || ""); }
+    catch (e) { alert("写入水印文字失败：" + e.message); return; }
+  }
   renderBatchList();
   setRunningUI(true, true);
   setStatus("⏳ 批量执行中…", "running");
@@ -2492,6 +2625,7 @@ async function runBatch() {
       log("❌ 参数构建失败，已跳过", "#ef4b5f");
       continue;
     }
+    if (textPath) steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{TEXTFILE}", textPath)); });
     const code = await executeSteps(steps, it.out ? dirname(it.out) : "");
     if (userStopped) {
       it.status = "stop"; stopCount++;
@@ -2557,6 +2691,7 @@ async function showOutputs() {
   const o = await fetch("/api/outputs").then(r => r.json());
   if (o.ok) OUTPUT_DIR = o.dir;
 
+  await loadFonts();
   renderNav();
   selectFeature("convert");
 
