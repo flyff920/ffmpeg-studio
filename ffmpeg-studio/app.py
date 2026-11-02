@@ -206,31 +206,82 @@ def api_snapshot():
     })
 
 
+def _rm(path):
+    """静默删除临时文件"""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _text(raw):
+    """把子进程输出解码成文本：不同系统的控制台编码不一样（UTF-8 / GBK），逐个试"""
+    if not raw:
+        return ""
+    for enc in ("utf-8", "gbk", "cp936"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, AttributeError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 @app.route("/api/browse", methods=["POST"])
 def api_browse():
     """通过 PowerShell 脚本弹出 Windows 原生文件对话框（置顶显示）"""
     body = request.json or {}
-    mode = body.get("mode", "open")          # open | save | folder
-    flt = body.get("filter", "所有文件 (*.*)|*.*")
+    mode = (body.get("mode") or "open")      # open | save | folder
+    flt = body.get("filter") or "所有文件 (*.*)|*.*"
     multi = bool(body.get("multi"))
 
     ps_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     if not os.path.exists(ps_exe):
         ps_exe = "powershell"
     script = os.path.join(BASE_DIR, "browse_dialog.ps1")
+    if not os.path.exists(script):
+        return jsonify({"ok": False, "error": "缺少 browse_dialog.ps1，文件对话框不可用"})
+
+    # 选中结果写进临时文件回传：不依赖子进程 stdout（为空、被占用、编码不同都不会出错）
+    fd, result_file = tempfile.mkstemp(prefix="browse_", suffix=".txt")
+    os.close(fd)
+
     cmd = [ps_exe, "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
-           "-File", script, "-Mode", mode, "-Filter", flt]
+           "-File", script, "-Mode", mode, "-Filter", flt, "-OutFile", result_file]
     if multi:
         cmd.append("-Multi")
+
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        paths = [p.strip() for p in out.stdout.splitlines() if p.strip()]
-        if out.returncode != 0 or (out.stderr and out.stderr.strip()):
-            return jsonify({"ok": False,
-                            "error": (out.stderr or "对话框启动失败").strip()[:500]})
-        return jsonify({"ok": True, "paths": paths})
+        proc = subprocess.run(cmd, capture_output=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        _rm(result_file)
+        return jsonify({"ok": False, "error": "等待选择文件超时（15 分钟无操作），请重试"})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+        _rm(result_file)
+        return jsonify({"ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+
+    raw = ""
+    try:
+        with open(result_file, "r", encoding="utf-8-sig") as fp:
+            raw = fp.read()
+    except OSError:
+        raw = ""
+    finally:
+        _rm(result_file)
+
+    stderr_text = _text(proc.stderr).strip()
+    stdout_text = _text(proc.stdout).strip()
+
+    paths = [p.strip() for p in raw.splitlines() if p.strip()]
+
+    # 兜底：个别环境下脚本没写文件，但标准输出里有内容
+    if not paths and stdout_text:
+        paths = [p.strip() for p in stdout_text.splitlines() if p.strip()]
+
+    if proc.returncode != 0 and not paths:
+        return jsonify({"ok": False,
+                        "error": (stderr_text or stdout_text or "文件对话框未能启动")[:400]})
+
+    return jsonify({"ok": True, "paths": paths})
 
 
 @app.route("/api/upload", methods=["POST"])
