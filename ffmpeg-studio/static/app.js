@@ -370,9 +370,9 @@ const FEATURES = [
     return { argv: a };
   }
 },
-/* ==================== 网课与流媒体 ==================== */
+/* ==================== 网页视频下载 ==================== */
 {
-  id: "tsmerge", group: "网课与流媒体", icon: "🧩", name: "TS 分片合并",
+  id: "tsmerge", group: "网页视频下载", icon: "🧩", name: "TS 分片合并",
   desc: "把 001.ts、002.ts… 上百个分片按顺序拼成一个完整 MP4",
   tag: "_merged", outExt: "mp4",
   params: [
@@ -404,13 +404,13 @@ const FEATURES = [
   }
 },
 {
-  id: "m3u8dl", group: "网课与流媒体", icon: "📥", name: "M3U8 下载",
-  desc: "把 m3u8 播放列表（含加密网课）直接下载成可播放的 MP4",
+  id: "m3u8dl", group: "网页视频下载", icon: "📥", name: "M3U8 下载",
+  desc: "把 m3u8 播放列表（含加密流）直接下载成可播放的 MP4",
   tag: "_download", outExt: "mp4",
   params: [
     { key: "url", label: "播放列表地址", type: "url", required: true,
-      placeholder: "https://…/index.m3u8 或本地 .m3u8 文件路径（可多行，每行一集）",
-      help: "m3u8 是一个<b>文本清单</b>，里面按顺序记录了成百上千个 .ts 分片地址。填进来就相当于让 FFmpeg 照着清单把分片全部下载、按序拼接、封装成 MP4。<br><br>链接可以粘贴多行（每行一集），会依次下载并自动加序号；也支持直接选<b>本地的 .m3u8 文件</b>（配合「TS 分片合并」用）。" },
+      placeholder: "https://…/index.m3u8 或本地 .m3u8 文件路径（可多行，每行一个视频）",
+      help: "m3u8 是一个<b>文本清单</b>，里面按顺序记录了成百上千个 .ts 分片地址。填进来就相当于让 FFmpeg 照着清单把分片全部下载、按序拼接、封装成 MP4。<br><br>链接可以粘贴多行（每行一个视频），会依次下载并自动加序号；也支持直接选<b>本地的 .m3u8 文件</b>（配合「TS 分片合并」用）。" },
     { key: "quality", label: "清晰度", type: "select", default: "highest",
       options: [
         { value: "highest", label: "最高画质（自动挑最大码率）" },
@@ -422,13 +422,13 @@ const FEATURES = [
         { value: "copy", label: "⚡ 原画直存（不重编码）" },
         { value: "reencode", label: "🎯 转 H.264（兼容最好）" }
       ],
-      help: "<b>原画直存</b>：分片里的码流直接搬进 MP4，速度只受网速限制，画质无损；<b>转 H.264</b>：某些课程用 HEVC 编码，部分播放器、剪辑软件、旧设备不认，转成 H.264 后到处能播，代价是要重编码、耗时更长。" },
+      help: "<b>原画直存</b>：分片里的码流直接搬进 MP4，速度只受网速限制，画质无损；<b>转 H.264</b>：有些站点用 HEVC / H.265 编码，部分播放器、剪辑软件、旧设备不认，转成 H.264 后到处能播，代价是要重编码、耗时更长。" },
     { key: "referer", label: "Referer", type: "text", advanced: true,
       placeholder: "如 https://www.example.com/",
-      help: "网课平台常见的<b>防盗链</b>手段：只允许从自己网站发起的请求读取分片。<b>直接下载报 403 / 404 时先填这个</b>——打开课程页，把浏览器地址栏的站点根地址填进来即可。" },
+      help: "很多网站用<b>防盗链</b>保护视频：只允许从自己站点的页面发起的请求读取分片。<b>直接下载报 403 时先填这个</b>——打开播放该视频的网页，把浏览器地址栏里的<b>协议 + 域名</b>（如 <code>https://www.example.com/</code>）填进来即可。" },
     { key: "cookie", label: "Cookie", type: "text", advanced: true,
-      placeholder: "需要登录才给看的课程才填",
-      help: "要登录才能看的课程，把浏览器的 Cookie 整段粘贴进来（F12 → 网络 → 任意请求 → 请求头 → Cookie）。填了就能带上你的登录态去取分片。<b>只在自己付费购买的课程上使用。</b>" },
+      placeholder: "需要登录才给看的视频才填",
+      help: "需要登录才能看的视频，把浏览器的 Cookie 整段粘贴进来（F12 → 网络 → 任意请求 → 请求头 → Cookie）。填了就能带上你的登录态去取分片。<b>请只用于你有权访问的内容。</b>" },
     { key: "ua", label: "User-Agent", type: "text", advanced: true, default: DEFAULT_UA,
       help: "伪装成浏览器发出的请求。默认已填 Chrome 的 UA，大多数站点够用；个别平台校验特定的 UA（如手机端），可以改成对应的值。" },
     { key: "output", label: "输出文件", type: "savefile", required: true, flag: "输出",
@@ -1519,7 +1519,7 @@ function highlightCmd(text) {
 }
 
 /* ---------------- 导航渲染 ---------------- */
-const GROUP_ORDER = ["视频处理", "音频处理", "特效与修复", "字幕与叠加", "图像与 GIF", "网课与流媒体", "专业编码与流媒体", "组合工具"];
+const GROUP_ORDER = ["视频处理", "音频处理", "特效与修复", "字幕与叠加", "图像与 GIF", "网页视频下载", "专业编码与流媒体", "组合工具"];
 
 function renderNav(filter = "") {
   const nav = $("#feature-nav");

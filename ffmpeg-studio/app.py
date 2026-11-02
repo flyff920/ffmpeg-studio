@@ -149,7 +149,7 @@ def api_concat_list():
     return jsonify({"ok": True, "path": list_path, "count": len(files)})
 
 
-# ---------------- 网课 / 流媒体：分片扫描 + 播放列表解析 ----------------
+# ---------------- 网页视频 / HLS：分片扫描 + 播放列表解析 ----------------
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 SEGMENT_EXTS = [".ts", ".m4s", ".m4v", ".mp4", ".flv", ".aac", ".mp3"]
@@ -162,7 +162,7 @@ def _natural_key(name):
 
 def _segments_in(folder):
     """扫描分片目录，返回 (分片列表, m3u8 列表, 主扩展名)。
-    主扩展名自动判定：有 .ts 就用 .ts（网课/直播回放最常见），否则取数量最多的那种。"""
+    主扩展名自动判定：有 .ts 就用 .ts（HLS 分片 / 直播回放最常见），否则取数量最多的那种。"""
     try:
         names = os.listdir(folder)
     except OSError:
