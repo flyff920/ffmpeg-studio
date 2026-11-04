@@ -50,6 +50,36 @@ async function writeTextFile(text) {
   return fpath(r.path);
 }
 
+/* ---------------- 局部打码：crop 出区域 → 遮挡 → overlay 盖回原位 ---------------- */
+function colorToFf(c) {
+  const s = String(c || "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(s)) return "0x" + s.slice(1);
+  return s || "black";
+}
+
+function maskEffect(mode, strength, color) {
+  const s = Math.max(2, Math.round(Number(strength) || 16));
+  if (mode === "blur") return `boxblur=${Math.max(1, Math.round(s / 2))}:2`;
+  if (mode === "black") return `drawbox=x=0:y=0:w=iw:h=ih:color=${colorToFf(color)}:t=fill`;
+  return `pixelize=${s}:${s}`;
+}
+
+/** outLabel 形如 "[v]"，拼在 overlay 后面作为输出标签 */
+function maskFc(r, mode, strength, color, outLabel) {
+  const eff = maskEffect(mode, strength, color);
+  return `[0:v]split[a][b];[b]crop=${r.w}:${r.h}:${r.x}:${r.y},${eff}[p];` +
+         `[a][p]overlay=${r.x}:${r.y}${outLabel}`;
+}
+
+/* ---------------- 画面比例 → 输出宽高（短边为基准，取偶数）---------------- */
+function ratioSize(ratio, shortSide) {
+  const [a, b] = String(ratio || "9:16").split(":").map(Number);
+  if (!a || !b) return { W: 1080, H: 1920 };
+  const s = Math.max(240, Math.round((Number(shortSide) || 1080) / 2) * 2);
+  if (a <= b) return { W: s, H: Math.round(s * b / a / 2) * 2 };
+  return { H: s, W: Math.round(s * a / b / 2) * 2 };
+}
+
 const FEATURES = [
 /* ==================== 视频处理 ==================== */
 {
@@ -1548,6 +1578,436 @@ const FEATURES = [
     }
     return { argv: a };
   }
+},
+
+/* ==================== 2026-11 新增：区域打码 / 预览图 / 音频修复 / 体积控制 ==================== */
+{
+  id: "blur_region", group: "特效与修复", icon: "🫥", name: "局部打码",
+  desc: "框选画面的一块区域，用马赛克、模糊或纯色块遮住",
+  tag: "_mask", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要在画面上遮挡某块区域的视频。常见用途：挡住<b>人脸、手机号、车牌、二维码、聊天窗口里的昵称</b>。<br><br>和「去除水印」正好相反：去水印是<b>用周围画面把污点补掉</b>，追求看不出来；打码是<b>故意把这块毁掉</b>，追求看不出原内容。" },
+    { key: "mode", label: "遮挡方式", type: "radio", default: "pixelize",
+      options: [
+        { value: "pixelize", label: "马赛克" },
+        { value: "blur", label: "高斯模糊" },
+        { value: "black", label: "纯色块" }
+      ],
+      help: "<b>马赛克</b>把区域切成大色块，最接近电视里的打码效果，基本无法还原；<b>模糊</b>观感柔和不扎眼，但弱一些的算法仍可能逆向还原；<b>纯色块</b>遮挡最彻底，适合证件号、地址这类不能露的。<br><br>这些操作会<b>永久破坏</b>那块像素，请务必保留原始文件。" },
+    { key: "strength", label: "强度", type: "range", default: 16, min: 4, max: 64, step: 2,
+      help: "马赛克模式下是<b>色块边长（像素）</b>，越大越糊；模糊模式下是模糊半径。<b>建议 16-24</b>：小于 8 可能还能认出五官，大于 40 就糊成一团纯色了。" },
+    { key: "color", label: "色块颜色", type: "color", default: "#000000", advanced: true,
+      help: "仅「纯色块」模式生效。默认黑色最保险，改成白色在深色画面里更协调。" },
+    { key: "region", label: "遮挡区域", type: "region", required: true, target: "要遮挡的区域",
+      previewVf: (r, vw, vh, vals) =>
+        ({ fc: maskFc(r, (vals || {}).mode || "pixelize", (vals || {}).strength || 16,
+                      (vals || {}).color || "#000000", "[out]") }),
+      help: "点「抓取画面并框选」，在画面上拖出要遮挡的范围，再点「预览效果」确认一帧。<br><br><b>框得比目标略大一圈</b>（多留 4~8 像素），否则边缘会露出一条仍能辨认的缝。<br><br>注意：区域是<b>固定的</b>——人脸在画面里移动时，只能压住它停留的那一块，走动过的位置仍会露出。要跟人走需要逐帧追踪，本工具不做。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "处理后的视频路径。打码必须重编码，默认 CRF 18 保画质。" }
+  ],
+  build(v) {
+    const r = v.region || {};
+    if (!r.w || !r.h) return { error: "请先点「抓取画面并框选」，在画面上框出要遮挡的区域" };
+    if (r.vw && r.vh && (r.x + r.w > r.vw || r.y + r.h > r.vh)) {
+      return { error: `框超出画面了：画面是 ${r.vw}×${r.vh}，当前右下角在 (${r.x + r.w}, ${r.y + r.h})，把宽高或位置调小些` };
+    }
+    return { argv: ["-i", v.input,
+      "-filter_complex", maskFc(r, v.mode, v.strength, v.color, "[v]"),
+      "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "18",
+      "-pix_fmt", "yuv420p", "-c:a", "copy", v.output] };
+  }
+},
+{
+  id: "thumb_grid", group: "图像与 GIF", icon: "🔲", name: "九宫格预览图",
+  desc: "把整段视频均匀抽帧拼成一张联系图，一眼看完全片内容",
+  tag: "_grid", outExt: "jpg",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要生成预览图的视频。做封面、挑精彩片段、给客户看全片结构时特别省事——一张图胜过拖一小时进度条。" },
+    { key: "layout", label: "排布", type: "select", default: "3x3",
+      options: [
+        { value: "3x3", label: "3 × 3（9 格，通用）" },
+        { value: "4x4", label: "4 × 4（16 格，看得更细）" },
+        { value: "3x4", label: "3 × 4（12 格，竖版发手机）" },
+        { value: "4x3", label: "4 × 3（12 格，横版）" },
+        { value: "5x4", label: "5 × 4（20 格，长视频）" }
+      ],
+      help: "格子越多看得越全面，但单格也越小。短视频 9 格够用，1 小时以上的课程建议 16-20 格。" },
+    { key: "width", label: "单格宽度", type: "number", default: 480,
+      help: "每个小格的像素宽度，高度按比例自动算。<b>480 适合微信、网页预览</b>；要打印或放大看细节可以设 800-1200，文件会大不少。" },
+    { key: "interval", label: "取帧间隔（秒）", type: "number", default: 0,
+      help: "<b>留 0 就是自动</b>：读取视频总时长，平均切成 N 份（N = 格子数），每份取一帧，正好填满整张图。<br><br>填大于 0 的数则固定每隔这么多秒取一帧，格子填满就停，后面的内容不出现——适合只想看片头一段的情况。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "生成的图片路径，建议 .jpg。" }
+  ],
+  build(v) {
+    const [c, r] = String(v.layout || "3x3").split("x").map(Number);
+    const w = Math.max(80, Number(v.width) || 480);
+    const iv = Number(v.interval) || 0;
+    const rate = iv > 0 ? (1 / iv).toFixed(6) : "{AUTOFPS}";
+    const fc = `fps=${rate},scale=${w}:-2,tile=${c}x${r}:padding=6:margin=6:color=0x222222`;
+    return { argv: ["-i", v.input, "-vf", fc, "-frames:v", "1", "-update", "1", "-q:v", "3", v.output] };
+  },
+  async prepare(v, steps, { log }) {
+    const iv = Number(v.interval) || 0;
+    if (iv > 0) return;
+    const r = await fetch("/api/probe", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: v.input }) }).then(x => x.json());
+    if (!r.ok) return { error: "读不到视频时长（" + (r.error || "未知原因") + "），请在「取帧间隔」里手填秒数" };
+    const dur = Number(((r.data || {}).format || {}).duration || 0);
+    if (!(dur > 0)) return { error: "读不到视频时长，请在「取帧间隔」里手填秒数" };
+    const [c, rr] = String(v.layout || "3x3").split("x").map(Number);
+    const n = (c || 3) * (rr || 3);
+    const step = dur / n;
+    log(`🎞 时长 ${dur.toFixed(1)} 秒 · 每 ${step.toFixed(2)} 秒取 1 帧 · 共 ${n} 格`);
+    const rate = (1 / step).toFixed(6);
+    steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{AUTOFPS}", rate)); });
+  }
+},
+{
+  id: "audio_denoise", group: "音频处理", icon: "🔇", name: "音频降噪",
+  desc: "消除录音底噪：电流声、空调声、风扇声、轻微环境噪音",
+  tag: "_denoised", outExt: "m4a",
+  extMap: ["format", { m4a: "m4a", mp3: "mp3", wav: "wav", keep: "mp4" }],
+  params: [
+    { key: "input", label: "音频 / 视频文件", type: "file", required: true,
+      filter: "音视频文件|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.mp4;*.mkv;*.mov;*.flv;*.webm|所有文件 (*.*)|*.*",
+      help: "要去底噪的音频或视频。处理的是<b>声音</b>，画面不受影响。<br><br>注意这和「降噪 / 去隔行」不是一回事——那个是给<b>画面</b>去噪点，这个是给<b>声音</b>去沙沙声。" },
+    { key: "strength", label: "降噪强度", type: "radio", default: "normal",
+      options: [
+        { value: "light", label: "轻度（保留人声细节）" },
+        { value: "normal", label: "标准（推荐）" },
+        { value: "strong", label: "强力（噪音很大时）" }
+      ],
+      help: "使用 afftdn 频域降噪。<b>轻度</b>约减 8dB，几乎听不出处理痕迹；<b>标准</b>约减 14dB，适合大部分手机录音和录屏；<b>强力</b>约减 22dB，底噪很吵时用，但人声会发闷、齿音变钝。<br><br>如果降完听起来像隔着一层棉被，就换回「轻度」。" },
+    { key: "format", label: "输出格式", type: "select", default: "m4a",
+      options: [
+        { value: "m4a", label: "M4A（AAC，通用）" },
+        { value: "mp3", label: "MP3（兼容老设备）" },
+        { value: "wav", label: "WAV（无损，体积大）" },
+        { value: "keep", label: "保留画面（输出 MP4）" }
+      ],
+      help: "只想拿声音就选前三个；<b>要保留画面</b>请选最后一项——它会复制原视频流、只重编码音频，适合给录好的视频去掉底噪。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "处理后的文件路径。扩展名会跟着上面的输出格式自动变。" }
+  ],
+  build(v) {
+    const chain = {
+      light: "afftdn=nr=8:nf=-35",
+      normal: "afftdn=nr=14:nf=-28",
+      strong: "afftdn=nr=22:nf=-20"
+    }[v.strength] || "afftdn=nr=14:nf=-28";
+    const a = ["-i", v.input];
+    if (v.format === "keep") {
+      a.push("-map", "0:v", "-map", "0:a:0", "-af", chain,
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k");
+    } else {
+      const enc = v.format === "mp3" ? ["-c:a", "libmp3lame", "-q:a", "2"]
+                : v.format === "wav" ? ["-c:a", "pcm_s16le"]
+                : ["-c:a", "aac", "-b:a", "192k"];
+      a.push("-map", "0:a:0", "-af", chain, ...enc);
+    }
+    a.push(v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "track_clean", group: "音频处理", icon: "🎚️", name: "音轨清理 / 换背景音乐",
+  desc: "剥掉多余音轨字幕给文件瘦身，或去掉原声换成自己的 BGM",
+  tag: "_tracks", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要处理的视频。下载来的片子常带<b>十几条音轨和字幕</b>（各国配音、导演评论、多语言字幕），一个文件好几个 G，其实你只会用其中一条。" },
+    { key: "action", label: "处理方式", type: "radio", default: "clean",
+      options: [
+        { value: "clean", label: "精简轨道" },
+        { value: "mute", label: "静音原声" },
+        { value: "replace", label: "换成 BGM" },
+        { value: "mix", label: "原声 + BGM 混音" }
+      ],
+      help: "<b>精简</b>：只保留主画面 + 第一条音轨，其余全丢，秒完成不重编码；<br><b>静音</b>：彻底去掉所有声音，画面不动；<br><b>换成</b>：原声完全不要，只放你选的音乐（BGM 短会自动循环）；<br><b>混音</b>：原声和音乐同时存在，比例可调，适合给讲解视频垫背景乐。" },
+    { key: "bgm", label: "背景音乐文件", type: "file",
+      filter: "音频文件|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg|所有文件 (*.*)|*.*",
+      help: "仅「换成 BGM」和「原声 + BGM 混音」需要。音乐比视频短会自动循环播放，不会中途静音。" },
+    { key: "bgmVol", label: "BGM 音量", type: "range", default: 100, min: 0, max: 200, unit: "%",
+      help: "100% 是原音量。混音模式下通常把 BGM 压到 <b>15-30%</b>，才盖不住人声。" },
+    { key: "origVol", label: "原声音量", type: "range", default: 100, min: 0, max: 200, unit: "%",
+      help: "仅「原声 + BGM 混音」生效。想让音乐更突出就把这个调低。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "输出文件路径。精简和静音是复制流，几秒就好；换 BGM / 混音要重编码音频。" }
+  ],
+  build(v) {
+    const act = v.action || "clean";
+    if ((act === "replace" || act === "mix") && !String(v.bgm || "").trim()) {
+      return { error: "选了「" + (act === "replace" ? "换成 BGM" : "原声 + BGM 混音") + "」，请先选一个背景音乐文件" };
+    }
+    if (act === "clean") {
+      return { argv: ["-i", v.input, "-map", "0:v:0", "-map", "0:a:0?",
+        "-c", "copy", "-movflags", "+faststart", v.output] };
+    }
+    if (act === "mute") {
+      return { argv: ["-i", v.input, "-map", "0:v:0", "-an",
+        "-c", "copy", "-movflags", "+faststart", v.output] };
+    }
+    if (act === "replace") {
+      return { argv: ["-i", v.input, "-stream_loop", "-1", "-i", v.bgm,
+        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+        "-af", `volume=${(Number(v.bgmVol) || 100) / 100}`,
+        "-c:a", "aac", "-b:a", "192k", "-shortest", v.output] };
+    }
+    const ov = (Number(v.origVol) || 100) / 100;
+    const bv = (Number(v.bgmVol) || 100) / 100;
+    const fc = `[0:a]volume=${ov}[a0];[1:a]volume=${bv}[a1];` +
+               `[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`;
+    return { argv: ["-i", v.input, "-stream_loop", "-1", "-i", v.bgm,
+      "-filter_complex", fc, "-map", "0:v:0", "-map", "[a]",
+      "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", v.output] };
+  }
+},
+{
+  id: "img_batch", group: "图像与 GIF", icon: "🖼️", name: "图片压缩 / 转格式",
+  desc: "把图片压小、转成 JPG / WebP / PNG，支持多选批量",
+  tag: "_mini", outExt: "jpg",
+  extMap: ["format", { jpg: "jpg", webp: "webp", png: "png" }],
+  params: [
+    { key: "input", label: "图片文件", type: "file", required: true, filter: IMAGE_FILTER,
+      help: "要压缩或转格式的图片。<b>要处理一整个文件夹的图</b>，点右上角「批量」把它们一次加进队列即可，参数对本批全部生效。" },
+    { key: "format", label: "输出格式", type: "select", default: "jpg",
+      options: [
+        { value: "jpg", label: "JPG（照片首选，体积最小）" },
+        { value: "webp", label: "WebP（同画质再小 25%）" },
+        { value: "png", label: "PNG（保留透明，体积大）" }
+      ],
+      help: "<b>JPG</b> 适合照片和截图，不支持透明；<b>WebP</b> 体积最小，微信、现代浏览器都支持，个别老软件打不开；<b>PNG</b> 只在需要透明背景时用，它无损、压不动，减体积主要靠降分辨率。" },
+    { key: "maxSide", label: "最长边（像素）", type: "number", default: 1920,
+      help: "图片长边超过这个值就等比缩小，<b>小于这个值不会被放大</b>。<br><br>公众号正文建议 <b>1080</b>，封面 <b>1920</b>，表情包/图标 200-400。填 <b>0</b> 表示不改尺寸、只重新压缩。" },
+    { key: "quality", label: "质量", type: "range", default: 82, min: 1, max: 100, unit: "%",
+      help: "JPG 会映射到 FFmpeg 的 -q:v（质量 82 ≈ q4）。<b>82-90 肉眼几乎无损</b>，70 以下开始出现色块，50 以下明显糊。WebP 直接对应 -quality。<b>PNG 忽略此项</b>（无损压缩）。" },
+    { key: "strip", label: "去除元数据", type: "switch", default: true,
+      help: "删掉 EXIF、GPS 定位、拍摄机型、缩略图等信息，能再小 5-15%，也<b>避免把家庭住址的定位坐标发出去</b>。需要保留拍摄参数时关掉。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "第一张图的保存路径；批量时每张按「原文件名 + 后缀」自动命名。" }
+  ],
+  build(v) {
+    const fmt = v.format || "jpg";
+    const max = Math.max(0, Number(v.maxSide) || 0);
+    const q = Math.max(1, Math.min(100, Number(v.quality) || 82));
+    const a = ["-i", v.input];
+    if (max > 0) {
+      // 只在超过目标尺寸时缩，避免把小图放大糊掉
+      a.push("-vf", `scale='if(gt(a,1),min(${max},iw),-2)':'if(gt(a,1),-2,min(${max},ih))'`);
+    }
+    if (fmt === "png") {
+      a.push("-c:v", "png", "-compression_level", "9");
+    } else if (fmt === "webp") {
+      a.push("-c:v", "libwebp", "-quality", String(q), "-compression_level", "6");
+    } else {
+      // -q:v 1~31，值越小越好；把 1-100 的质量映射过去
+      const qv = Math.max(2, Math.min(31, Math.round(31 - (q / 100) * 29)));
+      a.push("-q:v", String(qv));
+    }
+    if (v.strip) a.push("-map_metadata", "-1");
+    a.push("-frames:v", "1", "-update", "1", v.output);
+    return { argv: a };
+  }
+},
+{
+  id: "vertical", group: "视频处理", icon: "📱", name: "竖屏适配",
+  desc: "横屏转 9:16 竖屏，模糊背景或补边填充，不裁掉画面内容",
+  tag: "_vertical", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要转成竖屏的视频。横屏素材直接发到抖音、视频号、小红书，会被平台上下裁掉大半，或者被塞进窄条里。<br><br>这个功能把画面完整保留、居中放好，两边空出来的部分用<b>模糊放大的自身画面</b>填满，是最常见的短视频处理手法。" },
+    { key: "ratio", label: "目标比例", type: "radio", default: "9:16",
+      options: [
+        { value: "9:16", label: "9:16 竖屏" },
+        { value: "3:4", label: "3:4 小红书" },
+        { value: "4:5", label: "4:5 Instagram" },
+        { value: "1:1", label: "1:1 方形" },
+        { value: "16:9", label: "16:9 横屏" }
+      ],
+      help: "抖音 / 视频号 / 快手用 <b>9:16</b>；小红书图文和视频都偏 <b>3:4</b>；朋友圈和部分广告位用 1:1。选错了画面会出现黑边。" },
+    { key: "fit", label: "填充方式", type: "radio", default: "blur",
+      options: [
+        { value: "blur", label: "模糊背景（推荐）" },
+        { value: "color", label: "纯色补边" },
+        { value: "crop", label: "裁剪铺满" }
+      ],
+      help: "<b>模糊背景</b>把原画面放大虚化当背景，观感最自然，也是抖音上最常见的样式；<br><b>纯色补边</b>上下是纯色块，干净、体积小，适合 PPT、教程；<br><b>裁剪铺满</b>会放大并裁掉两侧，画面填满但<b>左右内容会丢失</b>。" },
+    { key: "shortSide", label: "输出短边分辨率", type: "number", default: 1080,
+      help: "竖屏时是宽度。<b>1080 是主流平台的高清标准</b>；想省流量可以用 720，老手机更流畅。高度由比例自动算。" },
+    { key: "blur", label: "背景模糊强度", type: "range", default: 20, min: 0, max: 50,
+      help: "仅模糊背景模式生效。<b>15-25 最自然</b>——太小学看不出是虚化，太大会变成一团色块，反而抢主体。" },
+    { key: "color", label: "补边颜色", type: "color", default: "#000000",
+      help: "仅纯色补边模式生效。黑色最百搭；配品牌色可以用十六进制。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "输出文件路径。要重编码，1 分钟视频大约需要 30 秒到 1 分钟。" }
+  ],
+  build(v) {
+    const { W, H } = ratioSize(v.ratio, v.shortSide);
+    let fc;
+    if (v.fit === "crop") {
+      fc = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}[v]`;
+    } else if (v.fit === "color") {
+      fc = `[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+           `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${colorToFf(v.color)}[v]`;
+    } else {
+      const b = Math.max(1, Number(v.blur) || 20);
+      fc = `[0:v]split[bg][fg];` +
+           `[bg]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},boxblur=${b}:3[bgb];` +
+           `[fg]scale=${W}:-2[fgs];` +
+           `[bgb][fgs]overlay=(W-w)/2:(H-h)/2[v]`;
+    }
+    return { argv: ["-i", v.input, "-filter_complex", fc,
+      "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-crf", "20",
+      "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+      v.output] };
+  }
+},
+{
+  id: "target_size", group: "视频处理", icon: "🎯", name: "压缩到指定大小",
+  desc: "按目标 MB 反算码率，两遍编码把体积卡在要求以内",
+  tag: "_sized", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要压到指定体积的视频。<br><br>为什么需要它：普通「视频压缩」调的是<b>画质（CRF）</b>，压完体积多少说不准。这个功能反过来——你告诉它<b>要多大</b>，它算出该用多少码率再编码，适合有明确上限的场景（微信 200MB、邮件附件 25MB、某些网站上传限制）。" },
+    { key: "targetMB", label: "目标大小", type: "number", default: 100,
+      help: "希望输出文件多大，单位 MB。<b>实际结果一般比目标小 3-10%</b>——预留了容器开销，宁可小也不会超（实测 10 秒视频设 1MB，输出 0.91MB）。<br><br>如果算出来码率低于 150 kbps，画面会明显糊，这时候更现实的办法是<b>先剪短</b>或<b>降分辨率</b>再压。" },
+    { key: "audioK", label: "音频码率", type: "select", default: "128",
+      options: [
+        { value: "64", label: "64 kbps（人声够用）" },
+        { value: "96", label: "96 kbps" },
+        { value: "128", label: "128 kbps（推荐）" },
+        { value: "192", label: "192 kbps（音乐片）" }
+      ],
+      help: "音频占的码率越少，画面能分到的越多。<b>讲课、口播 64-96 完全够</b>；音乐、电影建议 128-192。" },
+    { key: "codec", label: "编码器", type: "radio", default: "h264",
+      options: [
+        { value: "h264", label: "H.264（兼容性最好）" },
+        { value: "h265", label: "H.265（同体积画质更好）" }
+      ],
+      help: "<b>H.264</b> 任何设备都能放；<b>H.265</b> 同体积下画质约提升 30%，但部分老播放器、旧手机打不开，上传到某些平台会被二次转码。<br><br>不确定就选 H.264。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "输出文件路径。" }
+  ],
+  build(v) {
+    const enc = v.codec === "h265" ? "libx265" : "libx264";
+    const log = dirname(v.output) + "/" + stem(v.output) + "_2pass";
+    const vb = "{VBIT}";
+    const common = ["-c:v", enc, "-b:v", vb];
+    return {
+      steps: [
+        { argv: ["-i", v.input, ...common, "-pass", "1", "-passlogfile", log,
+                 "-an", "-f", "null", "-"],
+          note: "第一遍：只分析画面，不产出文件" },
+        { argv: ["-i", v.input, ...common, "-pass", "2", "-passlogfile", log,
+                 "-c:a", "aac", "-b:a", String(v.audioK || 128) + "k",
+                 "-movflags", "+faststart", v.output],
+          note: "第二遍：正式编码" }
+      ]
+    };
+  },
+  async prepare(v, steps, { log }) {
+    const r = await fetch("/api/probe", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: v.input }) }).then(x => x.json());
+    if (!r.ok) return { error: "读取视频信息失败：" + (r.error || "未知原因") };
+    const data = r.data || {};
+    const dur = Number((data.format || {}).duration || 0);
+    if (!(dur > 0)) return { error: "读不到视频时长，无法反算码率（可能是流式或损坏的文件）" };
+    const target = Math.max(1, Number(v.targetMB) || 100);
+    const ak = Number(v.audioK) || 128;
+    const hasAudio = (data.streams || []).some(s => s.codec_type === "audio");
+    const audioBits = hasAudio ? ak * 1000 * dur : 0;
+    // 1MB = 8*1024*1024 bit；留 3% 给容器开销
+    const videoBits = target * 8388608 * 0.97 - audioBits;
+    const vbps = Math.round(videoBits / dur);
+    if (!(vbps > 0)) {
+      return { error: `目标 ${target} MB 太小了，光音频就要占满——请调大目标体积，或把音频码率降到 64` };
+    }
+    const kb = Math.max(20, Math.round(vbps / 1000));
+    log(`🎯 时长 ${dur.toFixed(1)} 秒 · 目标 ${target} MB → 视频码率 ${kb} kbps` +
+        (hasAudio ? ` · 音频 ${ak} kbps` : " · 无音轨"));
+    if (kb < 150) {
+      log(`⚠ 只有 ${kb} kbps，画面会明显发糊。更现实的做法是先剪短时长，或把分辨率降到 720p`, "#f5a623");
+    }
+    steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{VBIT}", kb + "k")); });
+  }
+},
+{
+  id: "crop_black", group: "视频处理", icon: "🖤", name: "自动裁黑边",
+  desc: "探测画面上下左右的黑边并裁掉，压缩和转竖屏前先瘦身",
+  tag: "_nobar", outExt: "mp4",
+  params: [
+    { key: "input", label: "视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "要去黑边的视频。电影、老剧常见<b>上下几十到上百像素的纯黑边</b>，虽然看着黑，编码时仍占码率、占分辨率，转竖屏或压体积前裁掉能明显提升效率。" },
+    { key: "threshold", label: "黑边判定阈值", type: "number", default: 24, advanced: true,
+      help: "亮度低于这个值就当成黑色，范围 0-255。<b>默认 24 适合绝大多数片源</b>。<br><br>如果画面本来就暗（夜景、暗调影片）却<b>没探到黑边</b>，把它调低到 10-16；如果<b>误裁了暗色画面</b>，调高到 32-40。" },
+    { key: "crf", label: "画质 (CRF)", type: "range", default: 18, min: 12, max: 30, advanced: true,
+      help: "裁剪后要重编码，CRF 越小画质越好、文件越大。<b>18 基本无损</b>，20-23 体积更小。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "输出文件路径。执行时会先花几秒探测黑边，探测结果会打印在日志里。" }
+  ],
+  build(v) {
+    return { argv: ["-i", v.input, "-vf", "crop={CROP}",
+      "-c:v", "libx264", "-crf", String(v.crf || 18), "-preset", "veryfast",
+      "-pix_fmt", "yuv420p", "-c:a", "copy", v.output] };
+  },
+  async prepare(v, steps, { log }) {
+    log("🔍 正在探测画面黑边（最多分析前 60 秒）…");
+    const r = await fetch("/api/cropdetect", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: v.input, threshold: Number(v.threshold) || 24 }) }).then(x => x.json());
+    if (!r.ok) return { error: r.error || "探测失败" };
+    const c = r.crop || {}, o = r.orig || {};
+    log(`🔍 原始画面 ${o.w}×${o.h} → 有效画面 ${c.w}×${c.h}，偏移 (${c.x}, ${c.y})`);
+    if (o.w && o.h && c.w >= o.w && c.h >= o.h) {
+      return { error: `没有检测到黑边（有效画面就是 ${o.w}×${o.h}）。如果画面确实有黑边，把「黑边判定阈值」调低到 10-16 再试` };
+    }
+    const spec = `${c.w}:${c.h}:${c.x}:${c.y}`;
+    steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{CROP}", spec)); });
+  }
+},
+{
+  id: "repair", group: "特效与修复", icon: "🛠️", name: "修复损坏视频",
+  desc: "打不开、卡住、拖不动进度条的文件，尽量重封装救回来",
+  tag: "_fixed", outExt: "mp4",
+  params: [
+    { key: "input", label: "损坏的视频文件", type: "file", required: true, filter: VIDEO_FILTER,
+      help: "打不开、播到一半卡死、进度条拖不动的文件。<br><br>常见原因：<b>下载中断</b>、<b>录制时断电</b>、<b>拷贝过程出错</b>、<b>手机拍了半天没正常结束</b>。<br><br><b>能救的</b>：TS / FLV / MKV / AVI 这类「没有全局索引」或索引在文件头部的格式，中断后数据大多还在，重封装就能恢复。实测 10 秒的 TS 截掉 40% 后，能完整救回前 6.19 秒。<br><br><b>救不了的</b>：MP4 / MOV 如果把文件尾部截掉了——它的索引（moov）在<b>文件末尾</b>，丢了索引就没有任何一帧的定位信息，FFmpeg 会报 <code>moov atom not found</code>。这种情况需要专门的 untrunc 类工具拿同源文件的索引去套，本工具做不到。" },
+    { key: "mode", label: "修复方式", type: "radio", default: "remux",
+      options: [
+        { value: "remux", label: "快速重封装（推荐先试）" },
+        { value: "reencode", label: "逐帧重编码（最保险）" }
+      ],
+      help: "<b>重封装</b>：只重建文件外壳和索引，画面数据原样复制，几秒完成、<b>画质零损失</b>，能救回大部分索引损坏的文件；<br><b>重编码</b>：把每一帧解码再重新编码，能跳过彻底损坏的帧，救回率更高，但要花完整时长、画质略降。<br><br>建议先用重封装，不行再换重编码。" },
+    { key: "ifmt", label: "输入格式", type: "select", default: "auto", advanced: true,
+      options: [
+        { value: "auto", label: "自动识别（推荐）" },
+        { value: "mp4", label: "MP4 / MOV" },
+        { value: "ts", label: "TS / M2TS" },
+        { value: "flv", label: "FLV" },
+        { value: "mkv", label: "MKV" },
+        { value: "avi", label: "AVI" },
+        { value: "raw", label: "裸流 H.264 / H.265" }
+      ],
+      help: "自动识别失败（报 <code>Invalid data found</code>）时，手动指定容器的实际格式。文件扩展名被改错过的话，这里要选<b>它真正的格式</b>。" },
+    { key: "output", label: "保存为", type: "savefile", required: true, flag: "输出",
+      help: "修复后文件的保存路径，建议 .mp4。修复效果取决于损坏程度，<b>不能保证一定成功</b>——越早发现、文件越完整，救回率越高。" }
+  ],
+  build(v) {
+    const a = ["-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt"];
+    if (v.ifmt && v.ifmt !== "auto") a.push("-f", v.ifmt);
+    a.push("-i", v.input);
+    if (v.mode === "reencode") {
+      a.push("-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ignore_unknown");
+    } else {
+      a.push("-c", "copy", "-ignore_unknown");
+    }
+    a.push("-movflags", "+faststart", v.output);
+    return { argv: a };
+  }
 }
 ];
 
@@ -1671,7 +2131,7 @@ function renderNav(filter = "") {
   });
 }
 
-/* ---------------- 水印区域框选 ---------------- */
+/* ---------------- 区域框选（去水印 / 局部打码共用） ---------------- */
 function bindRegionPicker() {
   const picker = document.querySelector(".region-picker");
   if (!picker) return;
@@ -1683,6 +2143,11 @@ function bindRegionPicker() {
   const btnPrev = picker.querySelector(".btn-snap-vf");
   const timeInp = picker.querySelector("[data-snap-time]");
   const F = k => picker.querySelector(`[data-rk="${k}"]`);
+
+  // 不同功能框的对象不同：去水印框水印，打码框要遮挡的人脸/号码
+  const rparam = currentFeature && currentFeature.params.find(p => p.type === "region");
+  const target = (rparam && rparam.target) || "水印";
+  const previewVf = rparam && rparam.previewVf;
 
   let origW = 0, origH = 0;      // 视频原始分辨率
   let hasFrame = false;
@@ -1722,17 +2187,23 @@ function bindRegionPicker() {
     box.style.height = (h * k) + "px";
   };
 
-  // 抓帧：extraVf 为空取原图，否则返回套了 delogo 的效果图
-  const grab = async (extraVf) => {
+  // 抓帧：spec 为空取原图；字符串当作 -vf；{fc} 当作 -filter_complex
+  const grab = async (spec) => {
     const path = (getValue(currentFeature, "input") || "").trim();
     if (!path) { say("请先选择视频文件", "warn"); return; }
-    say(extraVf ? "正在生成效果预览…" : "正在抓取画面…");
+    const isFx = !!spec;
+    say(isFx ? "正在生成效果预览…" : "正在抓取画面…");
     btnSnap.disabled = true;
     btnPrev.disabled = true;
     try {
+      const payload = { path, time: Number(timeInp.value) || 0 };
+      if (isFx) {
+        if (typeof spec === "object" && spec.fc) payload.fc = spec.fc;
+        else payload.vf = String(spec);
+      }
       const r = await fetch("/api/snapshot", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, time: Number(timeInp.value) || 0, vf: extraVf || "" })
+        body: JSON.stringify(payload)
       }).then(x => x.json());
       if (!r.ok) { say(r.error || "抓取失败", "warn"); return; }
       origW = r.width || 0;
@@ -1748,9 +2219,9 @@ function bindRegionPicker() {
       hasFrame = true;
       syncBoxFromValues();
       btnPrev.disabled = false;
-      say(extraVf
-        ? "已套用去水印效果预览，满意就点「开始执行」"
-        : `已载入画面 ${origW}×${origH}，在图上拖拽框住水印`, "ok");
+      say(isFx
+        ? `已套用效果预览，满意就点「开始执行」`
+        : `已载入画面 ${origW}×${origH}，在图上拖拽框住${target}`, "ok");
     } catch (e) {
       say("抓取失败：" + e.message, "warn");
     } finally {
@@ -1762,7 +2233,10 @@ function bindRegionPicker() {
   btnPrev.onclick = () => {
     const { x, y, w, h } = region();
     if (w <= 0 || h <= 0) { say("先在图上框选，或手动填写宽高", "warn"); return; }
-    grab(`delogo=x=${x}:y=${y}:w=${w}:h=${h}`);
+    const spec = previewVf
+      ? previewVf({ x, y, w, h }, origW, origH)
+      : `delogo=x=${x}:y=${y}:w=${w}:h=${h}`;
+    grab(spec);
   };
 
   // 拖拽框选
@@ -1829,6 +2303,7 @@ function buildControl(f, p) {
   const wrap = document.createElement("div");
   const id = `${f.id}.${p.key}`;
   if (p.type === "region") {
+    const tg = p.target || "水印";
     wrap.innerHTML = `
       <div class="region-picker" data-key="${p.key}">
         <div class="region-toolbar">
@@ -1836,7 +2311,7 @@ function buildControl(f, p) {
           <button class="btn btn-mini btn-snap-vf" disabled>👁 预览效果</button>
           <label class="region-time">取帧 <input type="number" data-snap-time value="1" min="0" step="1"> 秒</label>
         </div>
-        <div class="region-status">先选好视频，再点「抓取画面并框选」；在画面上拖拽框住水印即可</div>
+        <div class="region-status">先选好视频，再点「抓取画面并框选」；在画面上拖拽框住${esc(tg)}即可</div>
         <div class="region-stage hidden">
           <img class="region-img" alt="预览帧">
           <div class="region-box hidden"></div>
@@ -2319,7 +2794,11 @@ function cmdLine(argv) {
 function displayArgv(argv) {
   return argv.map(a => {
     if (a === "{TSLIST}" || a === "{LIST}") return "<合并列表 · 运行时自动生成>";
-    return String(a).replace("textfile='{TEXTFILE}'", "textfile='<水印文字 · 运行时写入>'");
+    return String(a)
+      .replace("textfile='{TEXTFILE}'", "textfile='<水印文字 · 运行时写入>'")
+      .replace("{AUTOFPS}", "<自动按总时长计算>")
+      .replace("{VBIT}", "<按目标大小自动计算>")
+      .replace("{CROP}", "<自动探测>");
   });
 }
 
@@ -2615,6 +3094,20 @@ async function runCurrent() {
     }
   }
 
+  // 需要先探测（时长 / 黑边）才能算出参数的功能，执行前补一步
+  if (f.prepare) {
+    setStatus("准备中…", "running");
+    try {
+      const r2 = await f.prepare(v, steps, { log, setStatus });
+      if (r2 && r2.error) { log("⚠ " + r2.error, "#ef4b5f"); setStatus("准备失败", "error"); return; }
+      if (Array.isArray(r2)) { steps.length = 0; steps.push(...r2); }
+    } catch (e) {
+      log("⚠ 准备阶段出错：" + (e && e.message ? e.message : e), "#ef4b5f");
+      setStatus("准备失败", "error");
+      return;
+    }
+  }
+
   // M3U8 下载：支持多行链接，逐条执行
   let jobs = null, tmplUrl = "";
   if (f.needsM3U8) {
@@ -2837,6 +3330,19 @@ async function runBatch() {
       continue;
     }
     if (textPath) steps.forEach(s => { s.argv = s.argv.map(a => String(a).replace("{TEXTFILE}", textPath)); });
+    if (f.prepare) {
+      try {
+        const r2 = await f.prepare(v, steps, { log, setStatus, batch: true });
+        if (r2 && r2.error) {
+          it.status = "fail"; failCount++; renderBatchList();
+          log("⚠ " + r2.error, "#ef4b5f"); continue;
+        }
+        if (Array.isArray(r2)) { steps.length = 0; steps.push(...r2); }
+      } catch (e) {
+        it.status = "fail"; failCount++; renderBatchList();
+        log("⚠ 准备阶段出错：" + (e && e.message ? e.message : e), "#ef4b5f"); continue;
+      }
+    }
     const code = await executeSteps(steps, it.out ? dirname(it.out) : "");
     if (userStopped) {
       it.status = "stop"; stopCount++;

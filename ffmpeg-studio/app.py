@@ -170,6 +170,9 @@ def api_snapshot():
     except Exception:
         ow = oh = 0
 
+    # 复合滤镜预览（如 split→crop→pixelize→overlay），要求以 [out] 结尾
+    fc_extra = (body.get("fc") or "").strip()
+
     chains = []
     if vf_extra:
         chains.append(vf_extra)          # 滤镜先在原始分辨率上做，坐标才准
@@ -181,7 +184,15 @@ def api_snapshot():
     os.close(fd)
     cmd = [FFMPEG_BIN, "-hide_banner", "-v", "error", "-y", "-ss", "%.3f" % t,
            "-i", path, "-frames:v", "1", "-q:v", "3"]
-    if vf:
+    if fc_extra:
+        fc = fc_extra.rstrip(";")
+        if ow and ow > max_w:
+            fc += ";[out]scale=%d:-2[snapout]" % max_w
+            label = "[snapout]"
+        else:
+            label = "[out]"
+        cmd += ["-filter_complex", fc, "-map", label]
+    elif vf:
         cmd += ["-vf", vf]
     cmd.append(tmp)
     try:
@@ -204,6 +215,65 @@ def api_snapshot():
         "img": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii"),
         "width": ow, "height": oh,
     })
+
+
+@app.route("/api/cropdetect", methods=["POST"])
+def api_cropdetect():
+    """探测画面黑边，返回建议的裁切参数。
+
+    cropdetect 会在 stderr 反复打印 crop=w:h:x:y，取最后一条（最先稳定下来的值）。
+    """
+    body = request.json or {}
+    path = (body.get("path") or "").strip().strip('"')
+    if not path or not os.path.exists(path):
+        return jsonify({"ok": False, "error": "文件不存在: " + path})
+    try:
+        thr = max(0, min(255, int(body.get("threshold") or 24)))
+    except (TypeError, ValueError):
+        thr = 24
+    try:
+        limit = max(1.0, min(600.0, float(body.get("limit") or 60)))
+    except (TypeError, ValueError):
+        limit = 60.0
+
+    # 原始分辨率
+    ow = oh = 0
+    try:
+        p = subprocess.run([FFPROBE_BIN, "-v", "quiet", "-select_streams", "v:0",
+                            "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=30)
+        parts = (p.stdout or "").strip().splitlines()[0].split(",")
+        ow, oh = int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+
+    cmd = [FFMPEG_BIN, "-hide_banner", "-v", "info", "-t", "%.1f" % limit, "-i", path,
+           "-vf", "cropdetect=%d:2:0" % thr, "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "探测失败：" + str(e)})
+
+    found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", r.stderr or "")
+    if not found:
+        return jsonify({"ok": False,
+                        "error": "没有探测到画面信息，可能不是视频文件或解码失败：\n" +
+                                 (r.stderr or "")[-300:]})
+    # 取最后一个非零结果
+    w = h = x = y = 0
+    for cw, ch, cx, cy in found:
+        cw, ch, cx, cy = int(cw), int(ch), int(cx), int(cy)
+        if cw > 0 and ch > 0:
+            w, h, x, y = cw, ch, cx, cy
+    if not w:
+        return jsonify({"ok": False, "error": "探测结果无效（全为 0）"})
+
+    # 宽高必须是偶数，否则 yuv420p 编码会失败
+    w -= w % 2
+    h -= h % 2
+    return jsonify({"ok": True, "crop": {"w": w, "h": h, "x": x, "y": y},
+                    "orig": {"w": ow, "h": oh}, "samples": len(found)})
 
 
 def _rm(path):
